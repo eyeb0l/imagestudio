@@ -280,7 +280,7 @@ struct MissingFileTests {
         let name = "ImageStudio-test-\(UUID().uuidString).png"
         let image = makeImage(fileName: name)
         try Data([1, 2, 3]).write(to: image.fileURL)
-        defer { ImageStore.delete(fileName: name) }
+        defer { try? ImageStore.delete(fileName: name) }
 
         #expect(image.fileIsAvailable)
         #expect(image.copyToPasteboard())
