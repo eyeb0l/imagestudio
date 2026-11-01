@@ -21,3 +21,8 @@ Package.resolved
 
 # Claude Code local state (agent worktrees)
 .claude/
+
+# Local secrets
+.env
+.env.*
+!.env.example
