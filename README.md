@@ -9,6 +9,7 @@ A minimal, personal iOS app for generating images with the OpenAI Image API.
 - **Defaults** for new generations are set in Settings. Per-generation changes are highlighted and can be reset in one tap.
 - **Library** grid in the style of Photos. Long-press an image to export, copy, regenerate, reuse its prompt, select or delete it. Use **Select** to export, regenerate or delete several images at once.
 - **Detail view** with the image, prompt and generation details (model, size, quality, format, timing, tokens), plus export, regenerate and delete. Images made from references list them, and you can tap a reference to view it. Swipe between images; tap an image to view it full screen with pinch-to-zoom.
+- **Live Activity and notifications:** while generations run, a Live Activity on the Lock Screen and in the Dynamic Island shows how many images are on the way, the latest prompt and the elapsed time. When the last one finishes it shows a summary (e.g. "3 images ready, 1 failed") for 15 minutes, or closes at once if Image Studio is open. A generation that finishes or fails while the app isn't open also posts a notification with a thumbnail; tap it to open the image. Image Studio asks for notification permission the first time you generate. Both can be turned off in the Settings app.
 - **Secure API key**: stored in the iOS Keychain (`AfterFirstUnlockThisDeviceOnly`, so background generations can read it while the phone is locked), never synced or backed up, and checked against OpenAI when you save it. Keys saved by earlier versions are migrated automatically. If the Keychain can't be read, Settings says so and offers to retry instead of acting as if no key were saved.
 - **Resilient to a damaged library**: if the library database can't be opened, the app shows a recovery screen instead of crashing. **Try Again** retries; **Reset Library** moves the store files (never deletes them) to `Application Support/Library Backups/<timestamp>/` and starts a fresh library. Image files in `Application Support/Images` are untouched. Missing or undecodable image files show an "image unavailable" placeholder, and Export and Copy are disabled for them.
 
@@ -56,11 +57,14 @@ Custom sizes must use multiples of 16, have an aspect ratio between 1:3 and 3:1,
 ImageStudio/
   App/            App entry point and dependency wiring
   Models/         GenerationSettings (options and validation), GeneratedImage (SwiftData)
-  Services/       OpenAIImageClient, GenerationSession, Keychain/APIKeyStore, ImageStore/ImageLoader, ReferenceStore
+  Services/       OpenAIImageClient, GenerationSession, Keychain/APIKeyStore, ImageStore/ImageLoader, ReferenceStore,
+                  GenerationUpdates (Live Activity and notifications)
   State/          Studio (runs generations, owns library changes), Preferences, Composer
   Views/          Library, Composer, Detail, Settings, shared components
   Debug/          Sample library seeding (DEBUG builds only)
   Resources/      Asset catalog
+ImageStudioWidgets/ Widget extension: the Live Activity's Lock Screen and Dynamic Island views
+Shared/           Code compiled into both the app and the extension (Live Activity attributes)
 ImageStudioTests/ Swift Testing unit tests
 scripts/          make-icon.swift (renders the app icon)
 ```
@@ -72,5 +76,6 @@ Original image files are stored in `Application Support/Images`, and metadata is
 - **Sample data:** in a DEBUG build, launch with `-SeedSampleLibrary` to fill an empty library with locally rendered placeholder images. This lets you work on the UI without spending API credit. You can toggle it under *Edit Scheme → Run → Arguments*. `-SeedPendingJobs` adds an in-progress tile and a failed tile. `-SimulateLibraryOpenFailure` forces the library recovery screen (it succeeds again once you choose Reset Library).
 - **Mock API:** `python3 scripts/mock_openai.py 20` serves fake images after a 20-second delay on `127.0.0.1:8765`. Launch a DEBUG build with `-OpenAIBaseURL http://127.0.0.1:8765/v1` to use it. Any key will verify. It handles both `/images/generations` and multipart `/images/edits` requests. Add a second argument, e.g. `20 2`, to fail the first two requests with 503 + `Retry-After` and exercise automatic retries.
 - **Background generation:** requests run on a background `URLSession` (`GenerationSession`), so they continue while the app is suspended or after the system terminates it. Pending and failed jobs are stored as `PendingGeneration` records. Force-quitting the app cancels in-flight requests; those jobs show as failed with Retry.
+- **Live Activity and notifications:** `GenerationActivityController` starts the activity when a generation starts (ActivityKit only allows that in the foreground) and updates or ends it from background relaunches too. `GenerationNotifier` posts notifications only when the app isn't active. With the mock API above, start a generation and go to the Home Screen to see both. Preview the activity's layouts in `ImageStudioWidgets/GenerationLiveActivity.swift`.
 - **App icon:** `swift scripts/make-icon.swift ImageStudio/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`
 - **Signing:** automatic signing with team `359794K46A` (set in `project.yml`).
