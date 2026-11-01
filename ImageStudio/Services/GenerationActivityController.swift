@@ -101,6 +101,11 @@ final class GenerationActivityController {
     /// Starts an activity if generations are running but none is showing, e.g. because they
     /// were started while the app couldn't start one, or the user dismissed it.
     func appBecameActive() {
+        // Summaries left by background completions have done their job once the app is open.
+        for summary in Activity.activities where summary.activityState == .ended {
+            nonisolated(unsafe) let summary = summary
+            enqueue { await summary.end(nil, dismissalPolicy: .immediate) }
+        }
         sync(appIsActive: true)
     }
 
