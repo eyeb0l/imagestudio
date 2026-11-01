@@ -77,7 +77,13 @@ final class APIKeyStore {
     }
 
     func key() -> String? {
-        try? Keychain.read(service: service, account: account)
+        try? loadKey()
+    }
+
+    /// Reads the key, distinguishing "no key stored" (`nil`) from a Keychain failure (throws),
+    /// e.g. when the device is locked.
+    func loadKey() throws -> String? {
+        try Keychain.read(service: service, account: account)
     }
 
     func save(_ key: String) throws {

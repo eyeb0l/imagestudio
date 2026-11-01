@@ -68,5 +68,7 @@ Original image files are stored in `Application Support/Images`, and metadata is
 ## Development notes
 
 - **Sample data:** in a DEBUG build, launch with `-SeedSampleLibrary` to fill an empty library with locally rendered placeholder images. This lets you work on the UI without spending API credit. You can toggle it under *Edit Scheme → Run → Arguments*. `-SeedPendingJobs` adds an in-progress tile and a failed tile.
+- **Mock API:** `python3 scripts/mock_openai.py 20` serves fake images after a 20-second delay on `127.0.0.1:8765`. Launch a DEBUG build with `-OpenAIBaseURL http://127.0.0.1:8765/v1` to use it. Any key will verify.
+- **Background generation:** requests run on a background `URLSession` (`GenerationSession`), so they continue while the app is suspended or after the system terminates it. Pending and failed jobs are stored as `PendingGeneration` records. Force-quitting the app cancels in-flight requests; those jobs show as failed with Retry.
 - **App icon:** `swift scripts/make-icon.swift ImageStudio/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`
 - **Signing:** automatic signing with team `359794K46A` (set in `project.yml`).

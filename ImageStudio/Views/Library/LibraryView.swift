@@ -65,6 +65,11 @@ struct LibraryView: View {
         } message: { job in
             if case .failed(let message) = job.state { Text(message) }
         }
+        .alert("Something Went Wrong", isPresented: showingStudioAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(studio.alertMessage ?? "")
+        }
         .sensoryFeedback(.success, trigger: studio.completedCount)
         .sensoryFeedback(.error, trigger: studio.failureCount)
     }
@@ -243,6 +248,10 @@ struct LibraryView: View {
         pendingDeletion.count == 1
             ? "This image will be permanently deleted."
             : "These \(pendingDeletion.count) images will be permanently deleted."
+    }
+
+    private var showingStudioAlert: Binding<Bool> {
+        Binding(get: { studio.alertMessage != nil }, set: { if !$0 { studio.alertMessage = nil } })
     }
 
     private var inspectingJob: Binding<Bool> {

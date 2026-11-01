@@ -27,23 +27,31 @@ nonisolated enum OpenAIError: LocalizedError, Equatable {
     }
 }
 
-/// A thin client for the OpenAI Image API. Network and decoding work runs off the main actor.
+/// Builds, verifies and parses OpenAI Image API requests. Generation requests themselves run
+/// on a background URLSession (`GenerationSession`); this client's session is only used to verify keys.
 nonisolated struct OpenAIImageClient: Sendable {
     static let shared = OpenAIImageClient()
 
     let session: URLSession
     let baseURL: URL
 
-    init(session: URLSession? = nil, baseURL: URL = URL(string: "https://api.openai.com/v1")!) {
+    init(session: URLSession? = nil, baseURL: URL = OpenAIImageClient.defaultBaseURL) {
         self.session = session ?? Self.makeSession()
         self.baseURL = baseURL
     }
 
+    static var defaultBaseURL: URL {
+        #if DEBUG
+        // Lets a debug build target a local mock server: launch with `-OpenAIBaseURL http://127.0.0.1:8765/v1`.
+        if let override = UserDefaults.standard.string(forKey: "OpenAIBaseURL"), let url = URL(string: override) {
+            return url
+        }
+        #endif
+        return URL(string: "https://api.openai.com/v1")!
+    }
+
     private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
-        // High-quality and large generations can take minutes before the first byte arrives.
-        configuration.timeoutIntervalForRequest = 600
-        configuration.timeoutIntervalForResource = 900
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         return URLSession(configuration: configuration)
@@ -62,16 +70,14 @@ nonisolated struct OpenAIImageClient: Sendable {
 
     // MARK: Requests
 
-    @concurrent
-    func generate(prompt: String, settings: GenerationSettings, apiKey: String) async throws -> Output {
+    /// The request for `/images/generations`. The body is supplied separately because
+    /// generations run as background uploads (see `GenerationSession`).
+    static func generationRequest(apiKey: String, baseURL: URL = defaultBaseURL) -> URLRequest {
         var request = URLRequest(url: baseURL.appending(path: "images/generations"))
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try Self.requestBody(prompt: prompt, settings: settings)
-
-        let (data, response) = try await session.data(for: request)
-        return try Self.parseGeneration(data: data, response: response)
+        return request
     }
 
     /// Checks a key against a lightweight, free endpoint.
