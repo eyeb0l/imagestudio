@@ -8,6 +8,7 @@ struct StoredImageView: View {
     var contentMode: ContentMode = .fill
 
     @State private var image: UIImage?
+    @State private var loadFailed = false
 
     /// Smaller size that's usually already cached by the library grid; shown while loading.
     static let thumbnailPixelSize = 480
@@ -29,11 +30,21 @@ struct StoredImageView: View {
                     .aspectRatio(contentMode: contentMode)
             } else {
                 Rectangle().fill(.fill.tertiary)
+                if loadFailed {
+                    // The file is missing or can't be decoded.
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 22, weight: .light))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityLabel("Image unavailable")
+                }
             }
         }
         .task(id: "\(fileName)#\(maxPixelSize)") {
+            loadFailed = false
             if let loaded = await ImageLoader.shared.image(fileName: fileName, maxPixelSize: maxPixelSize) {
                 image = loaded
+            } else {
+                loadFailed = true
             }
         }
     }

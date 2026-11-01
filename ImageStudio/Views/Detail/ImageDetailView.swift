@@ -16,6 +16,7 @@ struct ImageDetailView: View {
     @State private var showingDeleteConfirmation = false
     @State private var fullscreenImage: GeneratedImage?
     @State private var showingSettings = false
+    @State private var toast: Toast?
 
     init(initialID: UUID) {
         self.initialID = initialID
@@ -40,6 +41,7 @@ struct ImageDetailView: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentID)
         .scrollIndicators(.hidden)
+        .toast($toast)
         .navigationTitle(current?.createdAt.formatted(.dateTime.day().month(.wide).year()) ?? "")
         .navigationSubtitle(current?.createdAt.formatted(date: .omitted, time: .shortened) ?? "")
         .navigationBarTitleDisplayMode(.inline)
@@ -58,7 +60,10 @@ struct ImageDetailView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if let current {
-                    Button("Copy Image", systemImage: "doc.on.doc") { current.copyToPasteboard() }
+                    Button("Copy Image", systemImage: "doc.on.doc") {
+                        if !current.copyToPasteboard() { toast = .copyFailed }
+                    }
+                    .disabled(!current.fileIsAvailable)
                     Button("Copy Prompt", systemImage: "text.quote") { UIPasteboard.general.string = current.prompt }
                     Button("Reuse Prompt", systemImage: "text.cursor") {
                         composer.reuse(current, defaults: preferences.defaults)
@@ -75,6 +80,7 @@ struct ImageDetailView: View {
                 ShareLink(item: current.fileURL) {
                     Label("Export", systemImage: "square.and.arrow.up")
                 }
+                .disabled(!current.fileIsAvailable)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -118,6 +124,7 @@ private struct ImageDetailPage: View {
     var onOpenFullscreen: () -> Void
 
     var body: some View {
+        let fileIsMissing = !image.fileIsAvailable
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 StoredImageView(fileName: image.fileName, maxPixelSize: 2048, contentMode: .fit)
@@ -129,12 +136,20 @@ private struct ImageDetailPage: View {
                     .accessibilityLabel("Image. Double tap to view full screen.")
                     .accessibilityAddTraits(.isButton)
 
+                if fileIsMissing {
+                    Label("The image file is missing from this device.", systemImage: "exclamationmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, -12)
+                }
+
                 VStack(alignment: .leading, spacing: 28) {
                     PromptBlock(title: "Prompt", text: image.prompt)
                     if let revised = image.revisedPrompt, revised != image.prompt {
                         PromptBlock(title: "Revised Prompt", text: revised)
                     }
-                    DetailsGrid(image: image)
+                    DetailsGrid(image: image, fileIsMissing: fileIsMissing)
                 }
                 .padding(.horizontal, 20)
             }
@@ -175,6 +190,7 @@ private struct SectionLabel: View {
 
 private struct DetailsGrid: View {
     let image: GeneratedImage
+    let fileIsMissing: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -201,7 +217,7 @@ private struct DetailsGrid: View {
             ("Moderation", image.moderation.capitalized),
             ("Created", image.createdAt.formatted(date: .abbreviated, time: .shortened)),
             ("Took", Duration.seconds(image.duration).formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated))),
-            ("File", Int64(image.fileSize).formatted(.byteCount(style: .file))),
+            ("File", fileIsMissing ? "Missing" : Int64(image.fileSize).formatted(.byteCount(style: .file))),
         ]
         if let input = image.inputTokens, let output = image.outputTokens {
             rows.append(("Tokens", "\(input.formatted()) in · \(output.formatted()) out"))

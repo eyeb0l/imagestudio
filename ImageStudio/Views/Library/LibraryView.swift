@@ -16,6 +16,7 @@ struct LibraryView: View {
     @State private var pendingDeletion: [GeneratedImage] = []
     @State private var showingDeleteConfirmation = false
     @State private var inspectedJob: Studio.Job?
+    @State private var toast: Toast?
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @FocusState private var composerFocused: Bool
     @Namespace private var zoomNamespace
@@ -31,6 +32,7 @@ struct LibraryView: View {
                     grid
                 }
             }
+            .toast($toast)
             .navigationTitle(title)
             .toolbarTitleDisplayMode(isSelecting ? .inline : .inlineLarge)
             .toolbar { toolbar }
@@ -108,7 +110,8 @@ struct LibraryView: View {
                         onRegenerate: { regenerate([image]) },
                         onReusePrompt: { reuse(image) },
                         onSelect: { beginSelection(with: image) },
-                        onDelete: { confirmDeletion(of: [image]) }
+                        onDelete: { confirmDeletion(of: [image]) },
+                        onNotice: { toast = $0 }
                     )
                 }
             } preview: {
@@ -143,10 +146,12 @@ struct LibraryView: View {
                 Button("Done", action: endSelection).fontWeight(.semibold)
             }
             ToolbarItem(placement: .bottomBar) {
-                ShareLink(items: selectedImages.map(\.fileURL)) {
+                // Images whose files have gone missing are skipped.
+                let exportable = selectedImages.filter(\.fileIsAvailable).map(\.fileURL)
+                ShareLink(items: exportable) {
                     Label("Export", systemImage: "square.and.arrow.up")
                 }
-                .disabled(selection.isEmpty)
+                .disabled(exportable.isEmpty)
             }
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItemGroup(placement: .bottomBar) {

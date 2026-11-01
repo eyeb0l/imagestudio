@@ -90,6 +90,20 @@ private struct APIKeySection: View {
                     fieldFocused = true
                 }
                 Button("Remove Key", role: .destructive) { showingRemoveConfirmation = true }
+            } else if let readError = apiKeys.readError, !isReplacing {
+                // A key may well be stored; don't present this as if there were none.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Couldn't read the saved key")
+                    Text(readError)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Try Again") { apiKeys.reload() }
+                Button("Enter a New Key") {
+                    message = nil
+                    isReplacing = true
+                    fieldFocused = true
+                }
             } else {
                 SecureField("sk-…", text: $draft)
                     .font(.body.monospaced())
@@ -135,8 +149,12 @@ private struct APIKeySection: View {
         .confirmationDialog("Remove your API key from this device?", isPresented: $showingRemoveConfirmation,
                             titleVisibility: .visible) {
             Button("Remove Key", role: .destructive) {
-                try? apiKeys.remove()
-                message = nil
+                do {
+                    try apiKeys.remove()
+                    message = nil
+                } catch {
+                    message = .error("Couldn't remove the key from the Keychain: \(error.localizedDescription)")
+                }
             }
         }
     }
