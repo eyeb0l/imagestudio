@@ -33,6 +33,10 @@ final class GeneratedImage {
     var inputTokens: Int?
     var outputTokens: Int?
 
+    /// Reference images (in `ReferenceStore`) this image was generated from. Empty for plain
+    /// text-to-image generations; the default lets existing libraries migrate.
+    var referenceFileNames: [String] = []
+
     init(
         id: UUID = UUID(),
         createdAt: Date = .now,
@@ -48,7 +52,8 @@ final class GeneratedImage {
         batchID: UUID,
         duration: TimeInterval,
         inputTokens: Int? = nil,
-        outputTokens: Int? = nil
+        outputTokens: Int? = nil,
+        referenceFileNames: [String] = []
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -71,6 +76,7 @@ final class GeneratedImage {
         self.duration = duration
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
+        self.referenceFileNames = referenceFileNames
     }
 }
 

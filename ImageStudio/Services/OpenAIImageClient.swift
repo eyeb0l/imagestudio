@@ -159,6 +159,56 @@ nonisolated struct OpenAIImageClient: Sendable {
         return request
     }
 
+    /// The request for `/images/edits`, which takes reference images as multipart form data.
+    static func editRequest(apiKey: String, boundary: String, baseURL: URL = defaultBaseURL) -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: "images/edits"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    /// One reference image in an edit request.
+    struct ReferenceUpload: Sendable {
+        let fileName: String
+        let mimeType: String
+        let data: Data
+    }
+
+    /// The multipart body for `/images/edits`: the same options as a generation, plus one
+    /// `image[]` part per reference image.
+    static func editRequestBody(prompt: String, settings: GenerationSettings,
+                                references: [ReferenceUpload], boundary: String) -> Data {
+        let settings = settings.normalized()
+        var fields: [(String, String)] = [
+            ("model", settings.model.rawValue),
+            ("prompt", prompt),
+            ("n", String(settings.count)),
+            ("size", settings.size.apiValue),
+            ("quality", settings.quality.rawValue),
+            ("background", settings.background.rawValue),
+            ("moderation", settings.moderation.rawValue),
+            ("output_format", settings.outputFormat.rawValue),
+        ]
+        if settings.outputFormat.supportsCompression {
+            fields.append(("output_compression", String(settings.compression)))
+        }
+
+        var body = Data()
+        func append(_ string: String) { body.append(Data(string.utf8)) }
+        for (name, value) in fields {
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n")
+        }
+        for reference in references {
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"\(reference.fileName)\"\r\n")
+            append("Content-Type: \(reference.mimeType)\r\n\r\n")
+            body.append(reference.data)
+            append("\r\n")
+        }
+        append("--\(boundary)--\r\n")
+        return body
+    }
+
     /// Checks a key against a lightweight, free endpoint.
     @concurrent
     func verify(apiKey: String) async throws {

@@ -13,15 +13,18 @@ final class PendingGeneration {
     var failureMessage: String?
     /// Which request attempt is in flight (1-based). The default lets existing stores migrate.
     var attempt: Int = 1
+    /// Reference images (in `ReferenceStore`) sent with the request.
+    var referenceFileNames: [String] = []
 
     init(id: UUID, prompt: String, settings: GenerationSettings, startedAt: Date,
-         failureMessage: String? = nil, attempt: Int = 1) {
+         failureMessage: String? = nil, attempt: Int = 1, referenceFileNames: [String] = []) {
         self.id = id
         self.prompt = prompt
         self.settingsData = (try? JSONEncoder().encode(settings)) ?? Data()
         self.startedAt = startedAt
         self.failureMessage = failureMessage
         self.attempt = attempt
+        self.referenceFileNames = referenceFileNames
     }
 }
 

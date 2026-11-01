@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 /// The floating prompt box: a prompt field, the active settings as tappable chips, and a send button.
@@ -9,20 +10,31 @@ struct ComposerBar: View {
     var onSubmit: () -> Void
 
     @State private var showingOptions = false
+    @State private var pickerItems: [PhotosPickerItem] = []
 
     var body: some View {
         @Bindable var composer = composer
         let settings = composer.settings(defaults: preferences.defaults)
         let defaults = preferences.defaults.normalized()
 
+        let hasReferences = !composer.references.isEmpty || composer.importingCount > 0
+
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Describe an image…", text: $composer.prompt, axis: .vertical)
+            if hasReferences {
+                ReferenceStrip()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            TextField(hasReferences ? "Describe what to make with these images…" : "Describe an image…",
+                      text: $composer.prompt, axis: .vertical)
                 .lineLimit(1...6)
                 .focused(isFocused)
                 .padding(.horizontal, 6)
                 .padding(.top, 4)
 
             HStack(spacing: 8) {
+                attachButton
+
                 ScrollView(.horizontal) {
                     HStack(spacing: 6) {
                         chips(settings: settings, defaults: defaults)
@@ -41,6 +53,32 @@ struct ComposerBar: View {
         .padding(.horizontal, 12)
         .padding(.bottom, 4)
         .sheet(isPresented: $showingOptions) { ComposerOptionsSheet() }
+        .animation(.snappy, value: hasReferences)
+        .onChange(of: pickerItems) { _, items in
+            guard !items.isEmpty else { return }
+            pickerItems = []
+            Task {
+                await composer.addReferences(items.map { item in
+                    { try await item.loadTransferable(type: Data.self) }
+                })
+            }
+        }
+    }
+
+    private var attachButton: some View {
+        let hasReferences = !composer.references.isEmpty
+        return PhotosPicker(
+            selection: $pickerItems,
+            maxSelectionCount: max(composer.remainingReferenceSlots, 1),
+            selectionBehavior: .ordered,
+            matching: .images,
+            photoLibrary: .shared()
+        ) {
+            OptionChip(systemImage: "photo.badge.plus", isModified: hasReferences)
+        }
+        .buttonStyle(.plain)
+        .disabled(composer.remainingReferenceSlots == 0)
+        .accessibilityLabel("Add Reference Images")
     }
 
     @ViewBuilder
@@ -115,6 +153,7 @@ struct ComposerBar: View {
 
     private var sendButton: some View {
         let isEmpty = composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || composer.importingCount > 0
         return Button(action: onSubmit) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 15, weight: .semibold))
@@ -215,5 +254,45 @@ struct ComposerOptionsSheet: View {
             get: { composer.settings(defaults: preferences.defaults) },
             set: { composer.setSettings($0, defaults: preferences.defaults) }
         )
+    }
+}
+
+/// Attached reference images, shown above the prompt with a remove button on each.
+private struct ReferenceStrip: View {
+    @Environment(Composer.self) private var composer
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(composer.references, id: \.self) { name in
+                    ReferenceThumbnail(fileName: name)
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                withAnimation(.snappy) { composer.removeReference(name) }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 20, height: 20)
+                                    .background(.black.opacity(0.55), in: .circle)
+                                    .padding(4)
+                                    .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove Reference")
+                        }
+                        .transition(.scale.combined(with: .opacity))
+                }
+                ForEach(0..<composer.importingCount, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 11)
+                        .fill(.fill.tertiary)
+                        .frame(width: 56, height: 56)
+                        .overlay { ProgressView().controlSize(.small) }
+                }
+            }
+            .padding(.top, 2)
+        }
+        .scrollIndicators(.hidden)
+        .scrollClipDisabled()
     }
 }

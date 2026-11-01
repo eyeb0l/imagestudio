@@ -22,6 +22,7 @@ struct ImageContextMenu: View {
     let image: GeneratedImage
     var onRegenerate: () -> Void
     var onReusePrompt: () -> Void
+    var onUseAsReference: () -> Void
     var onSelect: (() -> Void)?
     var onDelete: () -> Void
     var onNotice: (Toast) -> Void = { _ in }
@@ -38,6 +39,8 @@ struct ImageContextMenu: View {
         .disabled(!available)
         Button("Regenerate", systemImage: "arrow.clockwise", action: onRegenerate)
         Button("Reuse Prompt", systemImage: "text.cursor", action: onReusePrompt)
+        Button("Use as Reference", systemImage: "photo.badge.plus", action: onUseAsReference)
+            .disabled(!available)
         if let onSelect {
             Button("Select", systemImage: "checkmark.circle", action: onSelect)
         }

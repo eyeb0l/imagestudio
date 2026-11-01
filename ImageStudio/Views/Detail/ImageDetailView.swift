@@ -14,7 +14,7 @@ struct ImageDetailView: View {
     @Query(sort: \GeneratedImage.createdAt) private var images: [GeneratedImage]
     @State private var currentID: UUID?
     @State private var showingDeleteConfirmation = false
-    @State private var fullscreenImage: GeneratedImage?
+    @State private var fullscreen: FullscreenItem?
     @State private var showingSettings = false
     @State private var toast: Toast?
 
@@ -32,7 +32,7 @@ struct ImageDetailView: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(images) { image in
-                    ImageDetailPage(image: image) { fullscreenImage = image }
+                    ImageDetailPage(image: image) { fullscreen = FullscreenItem(url: $0) }
                         .containerRelativeFrame(.horizontal)
                 }
             }
@@ -50,7 +50,7 @@ struct ImageDetailView: View {
                             titleVisibility: .visible) {
             Button("Delete Image", role: .destructive, action: deleteCurrent)
         }
-        .fullScreenCover(item: $fullscreenImage) { FullscreenImageViewer(image: $0) }
+        .fullScreenCover(item: $fullscreen) { FullscreenImageViewer(url: $0.url) }
         .sheet(isPresented: $showingSettings) { SettingsView() }
         .onChange(of: images.isEmpty) { _, isEmpty in if isEmpty { dismiss() } }
     }
@@ -69,6 +69,12 @@ struct ImageDetailView: View {
                         composer.reuse(current, defaults: preferences.defaults)
                         dismiss()
                     }
+                    Button("Use as Reference", systemImage: "photo.badge.plus") {
+                        let image = current
+                        Task { await composer.addReferences(from: [image]) }
+                        dismiss()
+                    }
+                    .disabled(!current.fileIsAvailable || composer.remainingReferenceSlots == 0)
                 }
             } label: {
                 Label("More", systemImage: "ellipsis")
@@ -121,7 +127,8 @@ struct ImageDetailView: View {
 
 private struct ImageDetailPage: View {
     let image: GeneratedImage
-    var onOpenFullscreen: () -> Void
+    /// Opens a file (this image or one of its references) full screen.
+    var onOpenFullscreen: (URL) -> Void
 
     var body: some View {
         let fileIsMissing = !image.fileIsAvailable
@@ -132,7 +139,7 @@ private struct ImageDetailPage: View {
                     .background { if image.isTransparent { Checkerboard() } }
                     .frame(maxWidth: .infinity, maxHeight: 460)
                     .contentShape(.rect)
-                    .onTapGesture(perform: onOpenFullscreen)
+                    .onTapGesture { onOpenFullscreen(image.fileURL) }
                     .accessibilityLabel("Image. Double tap to view full screen.")
                     .accessibilityAddTraits(.isButton)
 
@@ -148,6 +155,26 @@ private struct ImageDetailPage: View {
                     PromptBlock(title: "Prompt", text: image.prompt)
                     if let revised = image.revisedPrompt, revised != image.prompt {
                         PromptBlock(title: "Revised Prompt", text: revised)
+                    }
+                    if !image.referenceFileNames.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            SectionLabel("References")
+                            ScrollView(.horizontal) {
+                                HStack(spacing: 8) {
+                                    ForEach(image.referenceFileNames, id: \.self) { name in
+                                        Button {
+                                            onOpenFullscreen(ReferenceStore.url(for: name))
+                                        } label: {
+                                            ReferenceThumbnail(fileName: name, size: 72)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(!ReferenceStore.fileExists(name))
+                                    }
+                                }
+                            }
+                            .scrollIndicators(.hidden)
+                            .scrollClipDisabled()
+                        }
                     }
                     DetailsGrid(image: image, fileIsMissing: fileIsMissing)
                 }

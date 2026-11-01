@@ -1,9 +1,15 @@
 import SwiftUI
 import UIKit
 
+/// An image file to show full screen (a library image or a reference).
+struct FullscreenItem: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
 /// Full-screen, pinch- and double-tap-zoomable view of an image.
 struct FullscreenImageViewer: View {
-    let image: GeneratedImage
+    let url: URL
     @Environment(\.dismiss) private var dismiss
     @State private var uiImage: UIImage?
 
@@ -35,7 +41,7 @@ struct FullscreenImageViewer: View {
         .environment(\.colorScheme, .dark)
         .statusBarHidden()
         .task {
-            uiImage = await ImageLoader.shared.image(fileName: image.fileName, maxPixelSize: 4096)
+            uiImage = await ImageLoader.shared.image(at: url, maxPixelSize: 4096)
         }
     }
 }

@@ -29,10 +29,13 @@ final class Studio {
         /// Which request attempt this is (1-based). Failed requests that are worth retrying are
         /// retried automatically while the job stays `.running`.
         var attempt: Int
+        /// Reference images (in `ReferenceStore`) sent with the request.
+        let references: [String]
 
         init(id: UUID = UUID(), prompt: String, settings: GenerationSettings,
-             startedAt: Date = .now, state: State = .running, attempt: Int = 1) {
+             startedAt: Date = .now, state: State = .running, attempt: Int = 1, references: [String] = []) {
             self.id = id
+            self.references = references
             self.prompt = prompt
             self.settings = settings
             self.startedAt = startedAt
@@ -82,8 +85,13 @@ final class Studio {
         }
         jobs = records.map { record in
             Job(id: record.id, prompt: record.prompt, settings: record.settings, startedAt: record.startedAt,
-                state: record.failureMessage.map { .failed($0) } ?? .running, attempt: record.attempt)
+                state: record.failureMessage.map { .failed($0) } ?? .running, attempt: record.attempt,
+                references: record.referenceFileNames)
         }
+
+        // Nothing else holds references at launch (the composer starts empty), so any file not
+        // used by an image or a job is left over, e.g. from an attachment that was never sent.
+        ReferenceStore.removeOrphans(keeping: referencedFileNames())
 
         session.setResultHandler { [weak self] ticket, outcome, retryAfter in
             await self?.handle(ticket, outcome, retryAfter: retryAfter)
@@ -97,12 +105,15 @@ final class Studio {
 
     // MARK: Generation
 
-    func generate(prompt: String, settings: GenerationSettings) {
+    /// Starts a generation. With `references` (file names in `ReferenceStore`), the request uses
+    /// them as reference images; the job takes ownership of those files.
+    func generate(prompt: String, settings: GenerationSettings, references: [String] = []) {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
-        let job = Job(prompt: prompt, settings: settings.normalized())
+        let job = Job(prompt: prompt, settings: settings.normalized(), references: references)
         withAnimation(.snappy) { jobs.append(job) }
-        context.insert(PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings, startedAt: job.startedAt))
+        context.insert(PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings,
+                                         startedAt: job.startedAt, referenceFileNames: job.references))
         // If this fails the request still runs and its images are still saved; only the
         // placeholder tile wouldn't survive a relaunch. The record is retried on the next save.
         saveContext("record pending generation")
@@ -112,7 +123,7 @@ final class Studio {
     /// Generates one new image per source image, using the same prompt and settings.
     func regenerate(_ images: [GeneratedImage]) {
         for image in images {
-            generate(prompt: image.prompt, settings: image.settings)
+            generate(prompt: image.prompt, settings: image.settings, references: image.referenceFileNames)
         }
     }
 
@@ -139,7 +150,8 @@ final class Studio {
 
     private func start(_ job: Job) {
         let ticket = GenerationTicket(jobID: job.id, prompt: job.prompt, settings: job.settings,
-                                      startedAt: job.startedAt, attempt: job.attempt)
+                                      startedAt: job.startedAt, attempt: job.attempt,
+                                      referenceFileNames: job.references)
         if let problem = submit(ticket) {
             markFailed(job.id, message: problem)
         }
@@ -284,7 +296,8 @@ final class Studio {
                 batchID: batchID,
                 duration: duration,
                 inputTokens: share(output.inputTokens),
-                outputTokens: share(output.outputTokens)
+                outputTokens: share(output.outputTokens),
+                referenceFileNames: ticket.referenceFileNames
             )
             context.insert(image)
             inserted.append(image)
@@ -316,7 +329,9 @@ final class Studio {
     }
 
     private func removeJob(_ id: Job.ID) {
+        let references = jobs.first { $0.id == id }?.references ?? []
         withAnimation(.snappy) { jobs.removeAll { $0.id == id } }
+        defer { releaseReferences(references) }
         heldOutputs[id] = nil
         do {
             try context.delete(model: PendingGeneration.self, where: #Predicate { $0.id == id })
@@ -336,7 +351,8 @@ final class Studio {
             if let existing = try context.fetch(FetchDescriptor<PendingGeneration>(predicate: #Predicate { $0.id == id })).first {
                 record = existing
             } else {
-                record = PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings, startedAt: job.startedAt)
+                record = PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings,
+                                           startedAt: job.startedAt, referenceFileNames: job.references)
                 context.insert(record)
             }
         } catch {
@@ -367,11 +383,39 @@ final class Studio {
     // MARK: Library
 
     func delete(_ images: [GeneratedImage]) {
+        let references = images.flatMap(\.referenceFileNames)
         if let problem = Self.deleteImages(images, in: context) { alertMessage = problem }
+        releaseReferences(references)
     }
 
     func deleteAll() {
         if let problem = Self.deleteEverything(in: context) { alertMessage = problem }
+        ReferenceStore.removeOrphans(keeping: referencedFileNames())
+    }
+
+    // MARK: References
+
+    /// Deletes reference files that no image or job uses any more. Files still held by the
+    /// composer are never passed here: the composer owns separate copies until it sends them.
+    private func releaseReferences(_ names: [String]) {
+        guard !names.isEmpty else { return }
+        let inUse = referencedFileNames()
+        ReferenceStore.delete(Set(names).subtracting(inUse))
+    }
+
+    private func referencedFileNames() -> Set<String> {
+        var names = Set(jobs.flatMap(\.references))
+        do {
+            for image in try context.fetch(FetchDescriptor<GeneratedImage>()) {
+                names.formUnion(image.referenceFileNames)
+            }
+        } catch {
+            // If the library can't be read, treat every file as in use rather than risk deleting one.
+            Self.log.error("Couldn't check reference usage: \(error.localizedDescription, privacy: .public)")
+            let all = (try? FileManager.default.contentsOfDirectory(atPath: ReferenceStore.directory.path(percentEncoded: false))) ?? []
+            names.formUnion(all)
+        }
+        return names
     }
 
     /// Deletes records first and files only once the records are gone, so a failure never leaves a

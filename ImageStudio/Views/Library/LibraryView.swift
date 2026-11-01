@@ -60,6 +60,7 @@ struct LibraryView: View {
             Button("Edit Prompt") {
                 composer.prompt = job.prompt
                 composer.setSettings(job.settings, defaults: preferences.defaults)
+                composer.replaceReferences(withCopiesOf: job.references)
                 studio.cancel(job)
                 composerFocused = true
             }
@@ -71,6 +72,11 @@ struct LibraryView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(studio.alertMessage ?? "")
+        }
+        .onChange(of: composer.importFailure) { _, message in
+            guard let message else { return }
+            toast = Toast(message: message)
+            composer.importFailure = nil
         }
         .sensoryFeedback(.success, trigger: studio.completedCount)
         .sensoryFeedback(.error, trigger: studio.failureCount)
@@ -109,6 +115,7 @@ struct LibraryView: View {
                         image: image,
                         onRegenerate: { regenerate([image]) },
                         onReusePrompt: { reuse(image) },
+                        onUseAsReference: { useAsReferences([image]) },
                         onSelect: { beginSelection(with: image) },
                         onDelete: { confirmDeletion(of: [image]) },
                         onNotice: { toast = $0 }
@@ -155,6 +162,11 @@ struct LibraryView: View {
             }
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItemGroup(placement: .bottomBar) {
+                Button("Use as References", systemImage: "photo.badge.plus") {
+                    useAsReferences(selectedImages.filter(\.fileIsAvailable))
+                    endSelection()
+                }
+                .disabled(selection.isEmpty)
                 Button("Regenerate", systemImage: "arrow.clockwise") {
                     regenerate(selectedImages)
                     endSelection()
@@ -186,7 +198,9 @@ struct LibraryView: View {
         }
         let prompt = composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
-        studio.generate(prompt: prompt, settings: composer.settings(defaults: preferences.defaults))
+        guard composer.importingCount == 0 else { return }
+        studio.generate(prompt: prompt, settings: composer.settings(defaults: preferences.defaults),
+                        references: composer.takeReferences())
         composer.prompt = ""
         composerFocused = false
         Task { withAnimation(.snappy) { scrollPosition.scrollTo(edge: .bottom) } }
@@ -207,6 +221,15 @@ struct LibraryView: View {
         }
         studio.regenerate(images)
         Task { withAnimation(.snappy) { scrollPosition.scrollTo(edge: .bottom) } }
+    }
+
+    private func useAsReferences(_ images: [GeneratedImage]) {
+        guard !images.isEmpty else { return }
+        if images.count > composer.remainingReferenceSlots {
+            toast = Toast(message: "Up to \(ReferenceStore.maxReferences) reference images", systemImage: "photo.stack")
+        }
+        Task { await composer.addReferences(from: images) }
+        composerFocused = true
     }
 
     private func reuse(_ image: GeneratedImage) {

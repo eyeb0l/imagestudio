@@ -5,7 +5,7 @@ Usage: python3 scripts/mock_openai.py [delay-seconds] [fail-first-n]   (listens 
 fail-first-n: answer the first N generation requests with 503 + Retry-After: 2 (to exercise retries).
 Then launch a DEBUG build with: -OpenAIBaseURL http://127.0.0.1:8765/v1
 """
-import base64, json, sys, time, zlib, struct
+import base64, json, re, sys, time, zlib, struct
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DELAY = float(sys.argv[1]) if len(sys.argv) > 1 else 20
@@ -33,8 +33,17 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         print("GET", self.path, flush=True); self._send(200, {"object": "list", "data": []})
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        print("POST", self.path, body.get("prompt"), "n=", body.get("n"), "auth=", self.headers.get("Authorization", "")[:14], flush=True)
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.path.endswith("/images/edits"):
+            # Multipart form: pull out the text fields and count the reference images.
+            text = raw.decode("latin-1")
+            fields = dict(re.findall(r'name="([^"\[\]]+)"\r\n\r\n(.*?)\r\n--', text, re.S))
+            body = {"prompt": fields.get("prompt"), "n": int(fields.get("n", 1))}
+            print("POST", self.path, body["prompt"], "n=", body["n"], "references=", text.count('name="image[]"'),
+                  "model=", fields.get("model"), flush=True)
+        else:
+            body = json.loads(raw)
+            print("POST", self.path, body.get("prompt"), "n=", body.get("n"), "auth=", self.headers.get("Authorization", "")[:14], flush=True)
         global failures
         if failures < FAIL_FIRST:
             failures += 1

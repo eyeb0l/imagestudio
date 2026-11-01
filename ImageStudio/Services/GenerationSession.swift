@@ -11,17 +11,21 @@ nonisolated struct GenerationTicket: Codable, Sendable, Equatable {
     let startedAt: Date
     /// Which request attempt this is (1-based). Tickets from before retries existed decode as 1.
     var attempt: Int = 1
+    /// Reference images (in `ReferenceStore`). Non-empty requests go to `/images/edits`.
+    var referenceFileNames: [String] = []
 
-    init(jobID: UUID, prompt: String, settings: GenerationSettings, startedAt: Date, attempt: Int = 1) {
+    init(jobID: UUID, prompt: String, settings: GenerationSettings, startedAt: Date, attempt: Int = 1,
+         referenceFileNames: [String] = []) {
         self.jobID = jobID
         self.prompt = prompt
         self.settings = settings
         self.startedAt = startedAt
         self.attempt = attempt
+        self.referenceFileNames = referenceFileNames
     }
 
     private enum CodingKeys: String, CodingKey {
-        case jobID, prompt, settings, startedAt, attempt
+        case jobID, prompt, settings, startedAt, attempt, referenceFileNames
     }
 
     init(from decoder: any Decoder) throws {
@@ -31,7 +35,8 @@ nonisolated struct GenerationTicket: Codable, Sendable, Equatable {
             prompt: try container.decode(String.self, forKey: .prompt),
             settings: try container.decode(GenerationSettings.self, forKey: .settings),
             startedAt: try container.decode(Date.self, forKey: .startedAt),
-            attempt: try container.decodeIfPresent(Int.self, forKey: .attempt) ?? 1
+            attempt: try container.decodeIfPresent(Int.self, forKey: .attempt) ?? 1,
+            referenceFileNames: try container.decodeIfPresent([String].self, forKey: .referenceFileNames) ?? []
         )
     }
 
@@ -112,11 +117,32 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
     func start(_ ticket: GenerationTicket, apiKey: String, notBefore: Date? = nil) throws {
         let bodyURL = Self.requestURL(for: ticket.jobID)
         try? FileManager.default.removeItem(at: Self.responseURL(for: ticket.jobID))
-        try OpenAIImageClient.requestBody(prompt: ticket.prompt, settings: ticket.settings)
-            .write(to: bodyURL, options: .atomic)
+
+        let request: URLRequest
+        if ticket.referenceFileNames.isEmpty {
+            try OpenAIImageClient.requestBody(prompt: ticket.prompt, settings: ticket.settings)
+                .write(to: bodyURL, options: .atomic)
+            request = OpenAIImageClient.generationRequest(apiKey: apiKey)
+        } else {
+            // With reference images the request goes to /images/edits as multipart form data.
+            let uploads = try ticket.referenceFileNames.enumerated().map { index, name in
+                guard ReferenceStore.fileExists(name) else { throw ReferenceStore.ImportError.missing }
+                let url = ReferenceStore.url(for: name)
+                return OpenAIImageClient.ReferenceUpload(
+                    fileName: "reference-\(index + 1).\(url.pathExtension)",
+                    mimeType: ReferenceStore.mimeType(for: name),
+                    data: try Data(contentsOf: url)
+                )
+            }
+            let boundary = "ImageStudio-\(UUID().uuidString)"
+            try OpenAIImageClient.editRequestBody(prompt: ticket.prompt, settings: ticket.settings,
+                                                  references: uploads, boundary: boundary)
+                .write(to: bodyURL, options: .atomic)
+            request = OpenAIImageClient.editRequest(apiKey: apiKey, boundary: boundary)
+        }
 
         // Background sessions only support uploads from a file, not in-memory bodies.
-        let task = session.uploadTask(with: OpenAIImageClient.generationRequest(apiKey: apiKey), fromFile: bodyURL)
+        let task = session.uploadTask(with: request, fromFile: bodyURL)
         task.taskDescription = String(decoding: try JSONEncoder().encode(ticket), as: UTF8.self)
         task.earliestBeginDate = notBefore
         task.resume()

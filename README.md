@@ -5,9 +5,10 @@
 A minimal, personal iOS app for generating images with the OpenAI Image API.
 
 - **Prompt box** pinned to the bottom of the library, showing the active model, size, quality and image count. Tap any chip to change it for the next generation, or open the options sheet for everything else (background, format, compression, moderation).
+- **Reference images:** attach up to 16 images from Photos with the photo button in the prompt box, or long-press a library image and choose **Use as Reference**. Requests with references use OpenAI's `/images/edits` endpoint, so you can restyle, combine or build on existing images. References are downscaled to 2048 px and stored with the images they produced. Regenerate and Reuse Prompt carry them over.
 - **Defaults** for new generations are set in Settings. Per-generation changes are highlighted and can be reset in one tap.
 - **Library** grid in the style of Photos. Long-press an image to export, copy, regenerate, reuse its prompt, select or delete it. Use **Select** to export, regenerate or delete several images at once.
-- **Detail view** with the image, prompt and generation details (model, size, quality, format, timing, tokens), plus export, regenerate and delete. Swipe between images; tap an image to view it full screen with pinch-to-zoom.
+- **Detail view** with the image, prompt and generation details (model, size, quality, format, timing, tokens), plus export, regenerate and delete. Images made from references list them, and you can tap a reference to view it. Swipe between images; tap an image to view it full screen with pinch-to-zoom.
 - **Secure API key**: stored in the iOS Keychain (`AfterFirstUnlockThisDeviceOnly`, so background generations can read it while the phone is locked), never synced or backed up, and checked against OpenAI when you save it. Keys saved by earlier versions are migrated automatically. If the Keychain can't be read, Settings says so and offers to retry instead of acting as if no key were saved.
 - **Resilient to a damaged library**: if the library database can't be opened, the app shows a recovery screen instead of crashing. **Try Again** retries; **Reset Library** moves the store files (never deletes them) to `Application Support/Library Backups/<timestamp>/` and starts a fresh library. Image files in `Application Support/Images` are untouched. Missing or undecodable image files show an "image unavailable" placeholder, and Export and Copy are disabled for them.
 
@@ -55,7 +56,7 @@ Custom sizes must use multiples of 16, have an aspect ratio between 1:3 and 3:1,
 ImageStudio/
   App/            App entry point and dependency wiring
   Models/         GenerationSettings (options and validation), GeneratedImage (SwiftData)
-  Services/       OpenAIImageClient, Keychain/APIKeyStore, ImageStore/ImageLoader
+  Services/       OpenAIImageClient, GenerationSession, Keychain/APIKeyStore, ImageStore/ImageLoader, ReferenceStore
   State/          Studio (runs generations, owns library changes), Preferences, Composer
   Views/          Library, Composer, Detail, Settings, shared components
   Debug/          Sample library seeding (DEBUG builds only)
@@ -69,7 +70,7 @@ Original image files are stored in `Application Support/Images`, and metadata is
 ## Development notes
 
 - **Sample data:** in a DEBUG build, launch with `-SeedSampleLibrary` to fill an empty library with locally rendered placeholder images. This lets you work on the UI without spending API credit. You can toggle it under *Edit Scheme → Run → Arguments*. `-SeedPendingJobs` adds an in-progress tile and a failed tile. `-SimulateLibraryOpenFailure` forces the library recovery screen (it succeeds again once you choose Reset Library).
-- **Mock API:** `python3 scripts/mock_openai.py 20` serves fake images after a 20-second delay on `127.0.0.1:8765`. Launch a DEBUG build with `-OpenAIBaseURL http://127.0.0.1:8765/v1` to use it. Any key will verify.
+- **Mock API:** `python3 scripts/mock_openai.py 20` serves fake images after a 20-second delay on `127.0.0.1:8765`. Launch a DEBUG build with `-OpenAIBaseURL http://127.0.0.1:8765/v1` to use it. Any key will verify. It handles both `/images/generations` and multipart `/images/edits` requests. Add a second argument, e.g. `20 2`, to fail the first two requests with 503 + `Retry-After` and exercise automatic retries.
 - **Background generation:** requests run on a background `URLSession` (`GenerationSession`), so they continue while the app is suspended or after the system terminates it. Pending and failed jobs are stored as `PendingGeneration` records. Force-quitting the app cancels in-flight requests; those jobs show as failed with Retry.
 - **App icon:** `swift scripts/make-icon.swift ImageStudio/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`
 - **Signing:** automatic signing with team `359794K46A` (set in `project.yml`).

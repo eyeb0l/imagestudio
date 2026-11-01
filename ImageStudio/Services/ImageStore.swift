@@ -89,23 +89,30 @@ nonisolated final class ImageLoader: @unchecked Sendable {
     }()
 
     func cachedImage(fileName: String, maxPixelSize: Int) -> UIImage? {
-        cache.object(forKey: Self.key(fileName, maxPixelSize))
+        cachedImage(at: ImageStore.url(for: fileName), maxPixelSize: maxPixelSize)
     }
 
     @concurrent
     func image(fileName: String, maxPixelSize: Int) async -> UIImage? {
-        let key = Self.key(fileName, maxPixelSize)
+        await image(at: ImageStore.url(for: fileName), maxPixelSize: maxPixelSize)
+    }
+
+    func cachedImage(at url: URL, maxPixelSize: Int) -> UIImage? {
+        cache.object(forKey: Self.key(url, maxPixelSize))
+    }
+
+    @concurrent
+    func image(at url: URL, maxPixelSize: Int) async -> UIImage? {
+        let key = Self.key(url, maxPixelSize)
         if let cached = cache.object(forKey: key) { return cached }
-        guard let image = Self.downsample(url: ImageStore.url(for: fileName), maxPixelSize: maxPixelSize) else {
-            return nil
-        }
+        guard let image = Self.downsample(url: url, maxPixelSize: maxPixelSize) else { return nil }
         let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
         cache.setObject(image, forKey: key, cost: cost)
         return image
     }
 
-    private static func key(_ fileName: String, _ maxPixelSize: Int) -> NSString {
-        "\(fileName)#\(maxPixelSize)" as NSString
+    private static func key(_ url: URL, _ maxPixelSize: Int) -> NSString {
+        "\(url.path(percentEncoded: false))#\(maxPixelSize)" as NSString
     }
 
     private static func downsample(url: URL, maxPixelSize: Int) -> UIImage? {
