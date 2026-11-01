@@ -5,6 +5,9 @@ import OSLog
 /// Builds Live Activity content from Studio's jobs and the results that arrived since the
 /// activity started. Free of ActivityKit so it can be tested.
 struct GenerationActivityTracker: Equatable {
+    /// The activity shows at most two lines of the prompt, and ActivityKit caps its data at 4 KB.
+    static let maxPromptLength = 200
+
     private(set) var savedImages = 0
     private(set) var failed = 0
     private var lastPrompt = ""
@@ -38,7 +41,7 @@ struct GenerationActivityTracker: Equatable {
             pendingImages: running.reduce(0) { $0 + $1.settings.count },
             savedImages: savedImages,
             failed: failed,
-            prompt: running.max { $0.startedAt < $1.startedAt }?.prompt ?? lastPrompt,
+            prompt: String((running.max { $0.startedAt < $1.startedAt }?.prompt ?? lastPrompt).prefix(Self.maxPromptLength)),
             startedAt: running.map(\.startedAt).min() ?? .now,
             isRetrying: running.contains { $0.attempt > 1 }
         )

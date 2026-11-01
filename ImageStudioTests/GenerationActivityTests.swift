@@ -83,6 +83,17 @@ struct GenerationActivityTests {
         #expect(try #require(tracker.state(for: [])).title == "Image ready")
     }
 
+    @Test func keepsLongPromptsWithinActivityKitLimits() throws {
+        let long = String(repeating: "a", count: 5_000)
+        let running = try #require(GenerationActivityTracker().state(for: [job(long, startedAt: t0)]))
+        #expect(running.prompt.count == GenerationActivityTracker.maxPromptLength)
+        #expect(try JSONEncoder().encode(running).count < 4096)
+
+        var tracker = GenerationActivityTracker()
+        tracker.recordSaved(1, prompt: long)
+        #expect(try #require(tracker.state(for: [])).prompt.count == GenerationActivityTracker.maxPromptLength)
+    }
+
     @Test func resumesTalliesFromAnEarlierProcess() throws {
         let previous = State(running: 1, pendingImages: 1, savedImages: 2, failed: 1, prompt: "earlier",
                              startedAt: t0, isRetrying: false)
