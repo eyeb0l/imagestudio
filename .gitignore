@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Xcode project is generated from project.yml by XcodeGen
+*.xcodeproj/
+*.xcworkspace/
+
+# Xcode user state and build products
+xcuserdata/
+DerivedData/
+build/
+*.xcresult
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
