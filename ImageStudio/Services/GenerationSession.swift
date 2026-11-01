@@ -9,6 +9,38 @@ nonisolated struct GenerationTicket: Codable, Sendable, Equatable {
     let prompt: String
     let settings: GenerationSettings
     let startedAt: Date
+    /// Which request attempt this is (1-based). Tickets from before retries existed decode as 1.
+    var attempt: Int = 1
+
+    init(jobID: UUID, prompt: String, settings: GenerationSettings, startedAt: Date, attempt: Int = 1) {
+        self.jobID = jobID
+        self.prompt = prompt
+        self.settings = settings
+        self.startedAt = startedAt
+        self.attempt = attempt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case jobID, prompt, settings, startedAt, attempt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            jobID: try container.decode(UUID.self, forKey: .jobID),
+            prompt: try container.decode(String.self, forKey: .prompt),
+            settings: try container.decode(GenerationSettings.self, forKey: .settings),
+            startedAt: try container.decode(Date.self, forKey: .startedAt),
+            attempt: try container.decodeIfPresent(Int.self, forKey: .attempt) ?? 1
+        )
+    }
+
+    /// The same job, for the next request attempt.
+    func nextAttempt() -> GenerationTicket {
+        var copy = self
+        copy.attempt += 1
+        return copy
+    }
 }
 
 /// Runs generation requests on a background URLSession. The system keeps these requests
@@ -19,12 +51,19 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
     static let shared = GenerationSession()
 
     typealias Outcome = Result<OpenAIImageClient.Output, any Error>
-    typealias ResultHandler = @MainActor @Sendable (GenerationTicket, Outcome) async -> Void
+    typealias ResultHandler = @MainActor @Sendable (GenerationTicket, Outcome, _ retryAfter: TimeInterval?) async -> Void
+
+    private struct Delivery {
+        let ticket: GenerationTicket
+        let outcome: Outcome
+        /// The server's `Retry-After` header, in seconds, if the response had one.
+        let retryAfter: TimeInterval?
+    }
 
     private struct State {
         var handler: ResultHandler?
         /// Results that arrived before a handler was registered.
-        var undelivered: [(GenerationTicket, Outcome)] = []
+        var undelivered: [Delivery] = []
         var responseFiles: [UUID: FileHandle] = [:]
         var processing: [UUID: Task<Void, Never>] = [:]
         var backgroundCompletion: (@Sendable () -> Void)?
@@ -59,7 +98,7 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
             defer { state.undelivered = [] }
             return state.undelivered
         }
-        for (ticket, outcome) in pending { deliver(ticket, outcome) }
+        for delivery in pending { deliver(delivery) }
     }
 
     /// Stores the system's completion handler from a background relaunch; it's called once
@@ -68,7 +107,9 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
         state.withLock { $0.backgroundCompletion = handler }
     }
 
-    func start(_ ticket: GenerationTicket, apiKey: String) throws {
+    /// Starts the request. With `notBefore`, the system holds it until then (used for retries),
+    /// including while the app is suspended.
+    func start(_ ticket: GenerationTicket, apiKey: String, notBefore: Date? = nil) throws {
         let bodyURL = Self.requestURL(for: ticket.jobID)
         try? FileManager.default.removeItem(at: Self.responseURL(for: ticket.jobID))
         try OpenAIImageClient.requestBody(prompt: ticket.prompt, settings: ticket.settings)
@@ -77,6 +118,7 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
         // Background sessions only support uploads from a file, not in-memory bodies.
         let task = session.uploadTask(with: OpenAIImageClient.generationRequest(apiKey: apiKey), fromFile: bodyURL)
         task.taskDescription = String(decoding: try JSONEncoder().encode(ticket), as: UTF8.self)
+        task.earliestBeginDate = notBefore
         task.resume()
     }
 
@@ -134,7 +176,7 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
 
         try? FileManager.default.removeItem(at: responseURL)
         try? FileManager.default.removeItem(at: Self.requestURL(for: ticket.jobID))
-        deliver(ticket, outcome)
+        deliver(Delivery(ticket: ticket, outcome: outcome, retryAfter: RetryPolicy.retryAfter(from: task.response)))
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -151,16 +193,16 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
 
     // MARK: Helpers
 
-    private func deliver(_ ticket: GenerationTicket, _ outcome: Outcome) {
+    private func deliver(_ delivery: Delivery) {
         state.withLock { state in
             guard let handler = state.handler else {
-                state.undelivered.append((ticket, outcome))
+                state.undelivered.append(delivery)
                 return
             }
             let id = UUID()
             // Created under the lock so the task can't remove itself before it's recorded.
             state.processing[id] = Task { @MainActor in
-                await handler(ticket, outcome)
+                await handler(delivery.ticket, delivery.outcome, delivery.retryAfter)
                 _ = self.state.withLock { $0.processing.removeValue(forKey: id) }
             }
         }

@@ -2,6 +2,17 @@ import Foundation
 import ImageIO
 import UIKit
 
+nonisolated enum ImageStoreError: LocalizedError {
+    case deletionFailed(count: Int, underlying: any Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .deletionFailed(let count, let underlying):
+            "\(count) image file\(count == 1 ? "" : "s") couldn't be removed from storage (\(underlying.localizedDescription))"
+        }
+    }
+}
+
 /// Stores original image files in Application Support/Images.
 nonisolated enum ImageStore {
     static let directory: URL = {
@@ -19,13 +30,34 @@ nonisolated enum ImageStore {
         try data.write(to: url(for: fileName), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
-    static func delete(fileName: String) {
-        try? FileManager.default.removeItem(at: url(for: fileName))
+    /// Deletes a file. A file that's already gone counts as deleted.
+    static func delete(fileName: String) throws {
+        try removeIfExists(url(for: fileName))
     }
 
-    static func deleteAll() {
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-        for file in files { try? FileManager.default.removeItem(at: file) }
+    /// Deletes every stored image, continuing past failures.
+    /// Throws `ImageStoreError` if any file couldn't be removed.
+    static func deleteAll() throws {
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        var failed = 0
+        var firstError: (any Error)?
+        for file in files {
+            do { try removeIfExists(file) } catch {
+                failed += 1
+                firstError = firstError ?? error
+            }
+        }
+        if let firstError { throw ImageStoreError.deletionFailed(count: failed, underlying: firstError) }
+    }
+
+    private static func removeIfExists(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+            return
+        } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
+            return
+        }
     }
 
     /// e.g. "ImageStudio-20261101-143205-3F9A2C.png" — a readable name for exports.

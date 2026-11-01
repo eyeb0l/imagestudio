@@ -27,6 +27,85 @@ nonisolated enum OpenAIError: LocalizedError, Equatable {
     }
 }
 
+/// Decides which failures are worth retrying automatically, and how long to wait.
+/// Pure functions, so the rules can be unit tested.
+nonisolated enum RetryPolicy {
+    /// Total attempts per job, including the first.
+    static let maxAttempts = 3
+    /// Longest wait we'll honour from a `Retry-After` header.
+    static let maxRetryAfter: TimeInterval = 60
+    /// Backoff before the second attempt; each further attempt waits four times longer (2s, 8s, 32s).
+    static let baseDelay: TimeInterval = 2
+    static let backoffFactor: Double = 4
+    /// Random spread applied to the backoff: the delay varies by up to +/-25%.
+    static let jitterFraction: Double = 0.25
+
+    static let transientURLErrors: Set<URLError.Code> = [
+        .timedOut, .networkConnectionLost, .cannotConnectToHost,
+        .notConnectedToInternet, .dnsLookupFailed, .cannotFindHost,
+    ]
+
+    /// Billing problems that show up as HTTP 429 but won't fix themselves.
+    private static let nonRetryableRateLimitCodes: Set<String> = ["insufficient_quota", "billing_hard_limit_reached"]
+
+    /// True for failures that may succeed if the same request is sent again.
+    static func isTransient(_ error: any Error) -> Bool {
+        if let urlError = error as? URLError {
+            return transientURLErrors.contains(urlError.code)
+        }
+        guard let openAIError = error as? OpenAIError, case .api(let status, let message, let code) = openAIError else {
+            return false
+        }
+        switch status {
+        case 429:
+            // A rate limit clears up; running out of quota does not.
+            if let code, nonRetryableRateLimitCodes.contains(code) { return false }
+            if message?.localizedCaseInsensitiveContains("current quota") == true { return false }
+            return true
+        case 500, 502, 503, 504:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Seconds to wait before the next attempt, or `nil` if the job should fail instead.
+    /// - Parameters:
+    ///   - attempt: The attempt that just failed (1-based).
+    ///   - retryAfter: The server's `Retry-After`, in seconds, if it sent one.
+    ///   - jitter: A value in 0...1 that positions the delay within its random spread.
+    static func retryDelay(after error: any Error, attempt: Int, retryAfter: TimeInterval? = nil,
+                           jitter: Double = .random(in: 0...1)) -> TimeInterval? {
+        guard attempt < maxAttempts, isTransient(error) else { return nil }
+        return delay(afterAttempt: attempt, retryAfter: retryAfter, jitter: jitter)
+    }
+
+    static func delay(afterAttempt attempt: Int, retryAfter: TimeInterval?, jitter: Double) -> TimeInterval {
+        if let retryAfter, retryAfter.isFinite {
+            return min(max(retryAfter, 1), maxRetryAfter)
+        }
+        let base = baseDelay * pow(backoffFactor, Double(max(attempt, 1) - 1))
+        let spread = 1 + jitterFraction * (2 * min(max(jitter, 0), 1) - 1)
+        return base * spread
+    }
+
+    /// Parses a `Retry-After` header given as a number of seconds. HTTP-date values are ignored.
+    static func retryAfter(from response: URLResponse?) -> TimeInterval? {
+        guard let value = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = TimeInterval(value.trimmingCharacters(in: .whitespaces)),
+              seconds.isFinite, seconds >= 0
+        else { return nil }
+        return seconds
+    }
+
+    /// "Rate limit reached." -> "Rate limit reached (after 3 attempts)."
+    static func exhaustedMessage(_ message: String, attempts: Int) -> String {
+        let suffix = "(after \(attempts) attempts)"
+        guard let last = message.last, ".!?".contains(last) else { return "\(message) \(suffix)" }
+        return "\(message.dropLast()) \(suffix)\(last)"
+    }
+}
+
 /// Builds, verifies and parses OpenAI Image API requests. Generation requests themselves run
 /// on a background URLSession (`GenerationSession`); this client's session is only used to verify keys.
 nonisolated struct OpenAIImageClient: Sendable {
