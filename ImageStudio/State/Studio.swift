@@ -49,7 +49,13 @@ final class Studio {
     }
 
     /// In-flight and failed generations, shown as placeholder tiles in the library.
-    private(set) var jobs: [Job] = []
+    private(set) var jobs: [Job] = [] {
+        didSet { if jobs != oldValue { observer?.jobsChanged(jobs) } }
+    }
+    /// Shows generations outside the app (Live Activity, notifications).
+    @ObservationIgnored var observer: (any GenerationObserver)? {
+        didSet { observer?.jobsChanged(jobs) }
+    }
     /// Incremented on each success / failure; drives haptics.
     private(set) var completedCount = 0
     private(set) var failureCount = 0
@@ -117,6 +123,7 @@ final class Studio {
         // If this fails the request still runs and its images are still saved; only the
         // placeholder tile wouldn't survive a relaunch. The record is retried on the next save.
         saveContext("record pending generation")
+        observer?.generationStarted()
         start(job)
     }
 
@@ -186,6 +193,9 @@ final class Studio {
             guard jobs.contains(where: { $0.id == ticket.jobID }) else { return }
             handleFailure(error, for: ticket, retryAfter: retryAfter)
         }
+        // After a background relaunch the app may be suspended once this returns, so make sure the
+        // Live Activity update and notification have gone out.
+        await observer?.settle()
     }
 
     private func handleFailure(_ error: any Error, for ticket: GenerationTicket, retryAfter: TimeInterval?) {
@@ -216,7 +226,9 @@ final class Studio {
     /// Saves a finished result to the library, then clears the job.
     private func finish(_ output: OpenAIImageClient.Output, for ticket: GenerationTicket) async {
         do {
-            try await Self.commit(output, for: ticket, in: context)
+            let images = try await Self.commit(output, for: ticket, in: context)
+            // Before the job is removed, so the Live Activity's summary counts these images.
+            observer?.generationSaved(jobID: ticket.jobID, prompt: ticket.prompt, images: images)
             removeJob(ticket.jobID)
             completedCount += 1
         } catch {
@@ -234,13 +246,15 @@ final class Studio {
         let active = await session.activeJobIDs()
         for id in restoredRunning where !active.contains(id) {
             guard let job = jobs.first(where: { $0.id == id }), !job.isFailed else { continue }
-            markFailed(id, message: Self.interruptedMessage, haptic: false)
+            markFailed(id, message: Self.interruptedMessage, announce: false)
         }
     }
 
     /// Adds a batch to the library all-or-nothing: every file is written first, then all records
     /// are inserted and saved once. On any failure the library and the image folder are left as
     /// they were, so retrying can't create duplicates. The closures exist so tests can inject failures.
+    /// Returns the new library images, in order.
+    @discardableResult
     static func commit(
         _ output: OpenAIImageClient.Output,
         for ticket: GenerationTicket,
@@ -249,7 +263,7 @@ final class Studio {
         writeFile: (Data, String) async throws -> Void = { try await ImageStore.save($0, fileName: $1) },
         removeFile: (String) throws -> Void = { try ImageStore.delete(fileName: $0) },
         persist: (ModelContext) throws -> Void = { try $0.save() }
-    ) async throws {
+    ) async throws -> [GeneratedImage] {
         let batchID = UUID()
         let duration = now.timeIntervalSince(ticket.startedAt)
         let reportedSize = output.size.flatMap(ImageSize.init(apiValue:))
@@ -309,6 +323,7 @@ final class Studio {
             discard(written.map(\.fileName))
             throw error
         }
+        return inserted
     }
 
     private static func message(for error: any Error) -> String {
@@ -321,11 +336,17 @@ final class Studio {
 
     // MARK: Job bookkeeping
 
-    private func markFailed(_ id: Job.ID, message: String, haptic: Bool = true) {
+    /// `announce: false` is for jobs found dead at launch: the user is opening the app and sees
+    /// them there, so there's no haptic or notification.
+    private func markFailed(_ id: Job.ID, message: String, announce: Bool = true) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+        if announce {
+            // Before the state changes, so the Live Activity's summary counts this failure.
+            observer?.generationFailed(jobID: id, prompt: jobs[index].prompt, message: message)
+        }
         jobs[index].state = .failed(message)
         updateRecord(jobs[index])
-        if haptic { failureCount += 1 }
+        if announce { failureCount += 1 }
     }
 
     private func removeJob(_ id: Job.ID) {

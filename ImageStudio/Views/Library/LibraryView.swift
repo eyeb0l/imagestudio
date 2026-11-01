@@ -6,6 +6,7 @@ struct LibraryView: View {
     @Environment(Composer.self) private var composer
     @Environment(Preferences.self) private var preferences
     @Environment(APIKeyStore.self) private var apiKeys
+    @Environment(GenerationNotifier.self) private var notifier
 
     @Query(sort: \GeneratedImage.createdAt, animation: .snappy) private var images: [GeneratedImage]
 
@@ -77,6 +78,11 @@ struct LibraryView: View {
             guard let message else { return }
             toast = Toast(message: message)
             composer.importFailure = nil
+        }
+        .onChange(of: notifier.openedImageID, initial: true) { _, id in
+            guard let id else { return }
+            notifier.openedImageID = nil
+            openFromNotification(id)
         }
         .sensoryFeedback(.success, trigger: studio.completedCount)
         .sensoryFeedback(.error, trigger: studio.failureCount)
@@ -212,6 +218,14 @@ struct LibraryView: View {
         } else {
             path.append(image.id)
         }
+    }
+
+    /// Shows the image a tapped notification points to, if it's still in the library.
+    private func openFromNotification(_ id: UUID) {
+        guard images.contains(where: { $0.id == id }) else { return }
+        showingSettings = false
+        endSelection()
+        path = [id]
     }
 
     private func regenerate(_ images: [GeneratedImage]) {

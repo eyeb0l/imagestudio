@@ -209,11 +209,13 @@ struct BatchSaveTests {
     @Test func savesWholeBatch() async throws {
         let context = try makeContext()
         let disk = FakeDisk()
-        try await Studio.commit(output(count: 3), for: ticket, in: context,
-                                writeFile: disk.write, removeFile: disk.remove)
+        let saved = try await Studio.commit(output(count: 3), for: ticket, in: context,
+                                            writeFile: disk.write, removeFile: disk.remove)
 
-        let images = try context.fetch(FetchDescriptor<GeneratedImage>())
+        let images = try context.fetch(FetchDescriptor<GeneratedImage>(sortBy: [SortDescriptor(\.createdAt)]))
         #expect(images.count == 3)
+        // Returns the new images in batch order (used for the notification thumbnail).
+        #expect(saved.map(\.id) == images.map(\.id))
         #expect(Set(images.map(\.fileName)) == Set(disk.files.keys))
         #expect(Set(images.map(\.batchID)).count == 1)
         #expect(images.allSatisfy { $0.inputTokens == 3 }) // 10 tokens shared across 3 images
@@ -225,7 +227,7 @@ struct BatchSaveTests {
         disk.failOnWrite = 3 // the third of four files fails
 
         await #expect(throws: Boom.self) {
-            try await Studio.commit(output(count: 4), for: ticket, in: context,
+            _ = try await Studio.commit(output(count: 4), for: ticket, in: context,
                                     writeFile: disk.write, removeFile: disk.remove)
         }
         #expect(disk.files.isEmpty)
@@ -238,7 +240,7 @@ struct BatchSaveTests {
         let disk = FakeDisk()
 
         await #expect(throws: Boom.self) {
-            try await Studio.commit(output(count: 2), for: ticket, in: context,
+            _ = try await Studio.commit(output(count: 2), for: ticket, in: context,
                                     writeFile: disk.write, removeFile: disk.remove,
                                     persist: { _ in throw Boom() })
         }
@@ -253,7 +255,7 @@ struct BatchSaveTests {
         let ticket = self.ticket
 
         await #expect(throws: Boom.self) {
-            try await Studio.commit(result, for: ticket, in: context,
+            _ = try await Studio.commit(result, for: ticket, in: context,
                                     writeFile: disk.write, removeFile: disk.remove,
                                     persist: { _ in throw Boom() })
         }
@@ -267,7 +269,7 @@ struct BatchSaveTests {
         let context = try makeContext()
         let disk = FakeDisk()
         await #expect(throws: Boom.self) {
-            try await Studio.commit(output(count: 1), for: ticket, in: context,
+            _ = try await Studio.commit(output(count: 1), for: ticket, in: context,
                                     writeFile: disk.write, removeFile: { _ in throw CocoaError(.fileWriteNoPermission) },
                                     persist: { _ in throw Boom() })
         }

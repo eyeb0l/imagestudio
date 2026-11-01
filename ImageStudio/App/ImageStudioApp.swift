@@ -8,8 +8,11 @@ struct ImageStudioApp: App {
     /// Created during app init (not when the first view appears) so that `Studio` reconnects to
     /// `GenerationSession` and saves results after a background relaunch, with or without UI.
     @State private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // Before launch finishes, so a tap on a notification that launches the app is delivered.
+        GenerationNotifier.shared.activate()
         _model = State(initialValue: AppModel())
     }
 
@@ -22,10 +25,15 @@ struct ImageStudioApp: App {
                     .environment(services.preferences)
                     .environment(services.composer)
                     .environment(services.studio)
+                    .environment(GenerationNotifier.shared)
                     .modelContainer(services.container)
             case .recovery:
                 LibraryRecoveryView(model: model)
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, case .ready(let services) = model.state else { return }
+            services.updates.appBecameActive()
         }
     }
 }
@@ -42,6 +50,7 @@ final class AppModel {
         let preferences: Preferences
         let composer: Composer
         let studio: Studio
+        let updates: GenerationUpdates
     }
 
     enum State {
@@ -111,13 +120,15 @@ final class AppModel {
     private func makeServices(container: ModelContainer) -> Services {
         let apiKeys = APIKeyStore()
         let studio = Studio(container: container, apiKeys: apiKeys)
+        let updates = GenerationUpdates()
+        studio.observer = updates
 
         #if DEBUG
         SampleLibrary.seedIfRequested(context: container.mainContext, studio: studio)
         #endif
 
         return Services(container: container, apiKeys: apiKeys, preferences: Preferences(),
-                        composer: Composer(), studio: studio)
+                        composer: Composer(), studio: studio, updates: updates)
     }
 
     private static func describe(_ error: Error) -> String {

@@ -29,6 +29,9 @@ targets:
     platform: iOS
     sources:
       - path: ImageStudio
+      - path: Shared
+    dependencies:
+      - target: ImageStudioWidgets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyeb0l.ImageStudio
@@ -44,8 +47,31 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: Image Studio saves the images you export to your photo library.
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        INFOPLIST_KEY_NSSupportsLiveActivities: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+
+  # Live Activity UI for background generations. The app starts and updates the activity.
+  ImageStudioWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ImageStudioWidgets
+      - path: Shared
+    info:
+      path: ImageStudioWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Image Studio
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.eyeb0l.ImageStudio.Widgets
+        PRODUCT_NAME: ImageStudioWidgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES
 
   ImageStudioTests:
     type: bundle.unit-test
