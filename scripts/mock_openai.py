@@ -297,7 +297,7 @@ class H(BaseHTTPRequestHandler):
             if FAIL_STATUS == 502:
                 time.sleep(DELAY)
                 page = b"<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body><center><h1>502 Bad Gateway</h1></center></body></html>"
-                self.send_response(502); self.send_header("Content-Type", "text/html"); self.send_header("CF-Ray", "mock-ray-LHR")
+                self.send_response(502); self.send_header("Content-Type", "text/html"); self.send_header("CF-Ray", "mock-ray-LHR"); self.send_header("Retry-After", "120")
                 self.send_header("Content-Length", str(len(page))); self.end_headers(); self.wfile.write(page)
                 print("  502 (failure", failures, "of", FAIL_FIRST, ")", flush=True)
                 return

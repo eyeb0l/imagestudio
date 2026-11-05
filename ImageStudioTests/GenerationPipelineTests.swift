@@ -370,7 +370,46 @@ struct GenerationFailureLogTests {
         #expect(log.server == "cloudflare")
         #expect(log.rayID == "abc-LHR")
         #expect(log.contentType == "text/html")
-        #expect(log.responseExcerpt == "<html> <head><title>502 Bad Gateway</title></head> </html>")
+        #expect(log.responseExcerpt == "502 Bad Gateway")
+    }
+
+    @Test func aPageTitleIsFoundPastItsBoilerplateAndAKeptRetryAfterIsRecorded() {
+        let page = "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"ie6\"> <![endif]-->\n" + String(repeating: " ", count: 1000)
+            + "<head>\n<TITLE>\n  api.openai.com | 502: Bad gateway\n</TITLE><meta charset=\"UTF-8\" /></head>"
+        let log = GenerationAttemptLog(ticket: ticket(), response: response(502, ["Retry-After": "120"]), data: Data(page.utf8))
+        #expect(log.responseExcerpt == "api.openai.com | 502: Bad gateway")
+        #expect(log.retryAfter == "120")
+        #expect(GenerationFailureReport.attemptRows(log).contains { $0.0 == "Retry-After" && $0.1 == "120" })
+    }
+
+    @Test func aLogSavedBeforeRetryAfterWasRecordedStillDecodes() throws {
+        let saved = try JSONEncoder().encode(GenerationAttemptLog(ticket: ticket(), response: response(502), data: Data()))
+        var fields = try #require(try JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        fields["retryAfter"] = nil
+        let old = try JSONSerialization.data(withJSONObject: fields)
+        #expect(try JSONDecoder().decode(GenerationAttemptLog.self, from: old).status == 502)
+    }
+
+    @Test func aBadGatewayForAnSVGIsNotRetriedAutomatically() {
+        let badGateway = OpenAIError.api(status: 502, message: nil, code: nil)
+        #expect(RetryPolicy.retryDelay(after: badGateway, attempt: 1, format: .svg) == nil)
+        for format in [OutputFormat.png, .jpeg, .webp, .gif] {
+            #expect(RetryPolicy.retryDelay(after: badGateway, attempt: 1, format: format) != nil, "\(format)")
+        }
+        // Other temporary failures for an SVG still are.
+        for status in [429, 500, 503, 504] {
+            let error = OpenAIError.api(status: status, message: nil, code: nil)
+            #expect(RetryPolicy.retryDelay(after: error, attempt: 1, format: .svg) != nil, "\(status)")
+        }
+        #expect(RetryPolicy.retryDelay(after: URLError(.timedOut), attempt: 1, format: .svg) != nil)
+    }
+
+    @Test func aBadGatewayForAnSVGSuggestsAnotherAuthor() {
+        let badGateway = OpenAIError.api(status: 502, message: nil, code: nil)
+        var settings = GenerationSettings()
+        #expect(Studio.message(for: badGateway, settings: settings) == "OpenAI returned an error (HTTP 502).")
+        settings.outputFormat = .svg
+        #expect(Studio.message(for: badGateway, settings: settings).contains("another SVG Author"))
     }
 
     @Test func recordsOpenAIsRequestDetails() {

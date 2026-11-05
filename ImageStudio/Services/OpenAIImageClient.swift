@@ -69,14 +69,28 @@ nonisolated enum RetryPolicy {
         }
     }
 
+    /// Whether a failure with this output format is worth sending again without being asked.
+    /// A 502 for an SVG has repeated on every attempt for a given prompt, after up to a minute's
+    /// work each time, so it's left to the user. Anything else transient is retried.
+    static func shouldRetryAutomatically(after error: any Error, format: OutputFormat) -> Bool {
+        guard isTransient(error) else { return false }
+        if format.isVector, isBadGateway(error) { return false }
+        return true
+    }
+
+    static func isBadGateway(_ error: any Error) -> Bool {
+        guard case .api(502, _, _) = error as? OpenAIError else { return false }
+        return true
+    }
+
     /// Seconds to wait before the next attempt, or `nil` if the job should fail instead.
     /// - Parameters:
     ///   - attempt: The attempt that just failed (1-based).
     ///   - retryAfter: The server's `Retry-After`, in seconds, if it sent one.
     ///   - jitter: A value in 0...1 that positions the delay within its random spread.
-    static func retryDelay(after error: any Error, attempt: Int, retryAfter: TimeInterval? = nil,
-                           jitter: Double = .random(in: 0...1)) -> TimeInterval? {
-        guard attempt < maxAttempts, isTransient(error) else { return nil }
+    static func retryDelay(after error: any Error, attempt: Int, format: OutputFormat = .png,
+                           retryAfter: TimeInterval? = nil, jitter: Double = .random(in: 0...1)) -> TimeInterval? {
+        guard attempt < maxAttempts, shouldRetryAutomatically(after: error, format: format) else { return nil }
         return delay(afterAttempt: attempt, retryAfter: retryAfter, jitter: jitter)
     }
 

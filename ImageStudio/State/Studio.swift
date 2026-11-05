@@ -225,7 +225,8 @@ final class Studio {
         var message = Self.message(for: error, settings: ticket.settings)
         record(attemptLog, message: message, jobID: ticket.jobID)
 
-        if let delay = RetryPolicy.retryDelay(after: error, attempt: ticket.attempt, retryAfter: retryAfter) {
+        if let delay = RetryPolicy.retryDelay(after: error, attempt: ticket.attempt, format: ticket.settings.outputFormat,
+                                              retryAfter: retryAfter) {
             // A new background task with an earliest start date, so it also runs if the app is
             // suspended before the delay is over. The job stays `.running`.
             let next = ticket.nextAttempt()
@@ -369,6 +370,9 @@ final class Studio {
         }
         if case .api(status: 403, _, _)? = error as? OpenAIError, settings.outputFormat.mayRequirePreviewAccess {
             return "\(error.localizedDescription) \(settings.outputFormat.displayName) output may need preview access for this model."
+        }
+        if settings.outputFormat.isVector, RetryPolicy.isBadGateway(error) {
+            return "\(error.localizedDescription) Retrying may not help with this prompt. Use Edit Prompt to try another SVG Author in the options."
         }
         return error.localizedDescription
     }

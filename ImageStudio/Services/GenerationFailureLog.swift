@@ -6,6 +6,7 @@ import Foundation
 nonisolated struct GenerationAttemptLog: Codable, Sendable, Equatable, Identifiable {
     /// Response text kept per attempt. An error page's start says what produced it.
     static let maxExcerptLength = 500
+    private static let titleSearchLength = 4096
 
     var id = UUID()
     let attempt: Int
@@ -22,6 +23,8 @@ nonisolated struct GenerationAttemptLog: Codable, Sendable, Equatable, Identifia
     let server: String?
     let rayID: String?
     let contentType: String?
+    /// The `Retry-After` header as sent, including values longer than the app will wait.
+    let retryAfter: String?
     let responseExcerpt: String?
     /// The message the app showed for this attempt.
     var message = ""
@@ -37,11 +40,16 @@ nonisolated struct GenerationAttemptLog: Codable, Sendable, Equatable, Identifia
         server = http?.value(forHTTPHeaderField: "server")
         rayID = http?.value(forHTTPHeaderField: "cf-ray")
         contentType = http?.value(forHTTPHeaderField: "content-type")
+        retryAfter = http?.value(forHTTPHeaderField: "retry-after")
         responseExcerpt = Self.excerpt(of: data)
     }
 
+    /// The start of a response or, for an error page, just its title: what comes first in one
+    /// is mostly boilerplate.
     static func excerpt(of data: Data) -> String? {
-        let text = String(decoding: data.prefix(maxExcerptLength), as: UTF8.self)
+        let start = String(decoding: data.prefix(titleSearchLength), as: UTF8.self)
+        let title = start.firstMatch(of: /(?is)<title[^>]*>(.*?)<\/title>/).map { String($0.1) }
+        let text = (title ?? String(decoding: data.prefix(maxExcerptLength), as: UTF8.self))
             .replacing(/sk-[A-Za-z0-9_\-*•]+/, with: "sk-…")
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
@@ -107,6 +115,7 @@ nonisolated enum GenerationFailureReport {
         if let server = attempt.server { rows.append(("Server", server)) }
         if let ray = attempt.rayID { rows.append(("CF-Ray", ray)) }
         if let type = attempt.contentType { rows.append(("Content type", type)) }
+        if let retryAfter = attempt.retryAfter { rows.append(("Retry-After", retryAfter)) }
         if let excerpt = attempt.responseExcerpt { rows.append(("Response", excerpt)) }
         return rows
     }
