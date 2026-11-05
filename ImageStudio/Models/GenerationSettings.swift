@@ -4,15 +4,13 @@ import UniformTypeIdentifiers
 // MARK: - Model
 
 /// Image models offered by the OpenAI Image API (`/v1/images/generations`).
-/// DALL·E and `gpt-image-1` are retired and intentionally omitted.
+/// DALL·E, `gpt-image-1`, `gpt-image-1.5` and `gpt-image-1-mini` are retired and intentionally omitted.
 nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendable {
     case flare26 = "gpt-image-2.6-flare"
     case sunburst26 = "gpt-image-2.6-sunburst"
     case flare25 = "gpt-image-2.5-flare"
     case sunburst25 = "gpt-image-2.5-sunburst"
     case gptImage2 = "gpt-image-2"
-    case gptImage15 = "gpt-image-1.5"
-    case gptImage1Mini = "gpt-image-1-mini"
 
     var id: String { rawValue }
 
@@ -23,8 +21,6 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
         case .flare25: "GPT Image 2.5 Flare"
         case .sunburst25: "GPT Image 2.5 Sunburst"
         case .gptImage2: "GPT Image 2"
-        case .gptImage15: "GPT Image 1.5"
-        case .gptImage1Mini: "GPT Image 1 Mini"
         }
     }
 
@@ -35,8 +31,6 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
         case .flare25: "Flare 2.5"
         case .sunburst25: "Sunburst 2.5"
         case .gptImage2: "Image 2"
-        case .gptImage15: "Image 1.5"
-        case .gptImage1Mini: "1 Mini"
         }
     }
 
@@ -47,23 +41,13 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
         case .flare25: "Fast, high-quality everyday images."
         case .sunburst25: "Highest fidelity and precision. Slower."
         case .gptImage2: "Previous generation. Custom sizes up to 4K."
-        case .gptImage15: "Earlier model. Standard sizes only."
-        case .gptImage1Mini: "Lightweight and economical. Standard sizes only."
-        }
-    }
-
-    /// Whether arbitrary `WIDTHxHEIGHT` sizes are accepted (vs. the three fixed sizes).
-    var supportsCustomSizes: Bool {
-        switch self {
-        case .flare26, .sunburst26, .flare25, .sunburst25, .gptImage2: true
-        case .gptImage15, .gptImage1Mini: false
         }
     }
 
     var supportedQualities: [ImageQuality] {
         switch self {
         case .flare26, .sunburst26, .flare25, .sunburst25: ImageQuality.allCases
-        case .gptImage2, .gptImage15, .gptImage1Mini: [.auto, .low, .medium, .high]
+        case .gptImage2: [.auto, .low, .medium, .high]
         }
     }
 
@@ -71,7 +55,7 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
     var supportsComplexity: Bool {
         switch self {
         case .flare26, .sunburst26: true
-        case .flare25, .sunburst25, .gptImage2, .gptImage15, .gptImage1Mini: false
+        case .flare25, .sunburst25, .gptImage2: false
         }
     }
 
@@ -79,7 +63,7 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
     var supportsMarkup: Bool {
         switch self {
         case .flare26, .sunburst26, .flare25, .sunburst25: true
-        case .gptImage2, .gptImage15, .gptImage1Mini: false
+        case .gptImage2: false
         }
     }
 
@@ -94,7 +78,7 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
     var supportedFormats: [OutputFormat] {
         switch self {
         case .flare26, .sunburst26: OutputFormat.allCases
-        case .flare25, .sunburst25, .gptImage2, .gptImage15, .gptImage1Mini: [.png, .jpeg, .webp]
+        case .flare25, .sunburst25, .gptImage2: [.png, .jpeg, .webp]
         }
     }
 
@@ -105,7 +89,7 @@ nonisolated enum ImageModel: String, Codable, CaseIterable, Identifiable, Sendab
     }
 
     var sizePresets: [ImageSize] {
-        supportsCustomSizes ? ImageSize.standardPresets + ImageSize.extendedPresets : ImageSize.standardPresets
+        ImageSize.standardPresets + ImageSize.extendedPresets
     }
 }
 
@@ -334,10 +318,10 @@ nonisolated struct ImageSize: Hashable, Sendable, Identifiable {
     static let landscape = ImageSize(width: 1536, height: 1024)
     static let portrait = ImageSize(width: 1024, height: 1536)
 
-    /// Sizes every GPT Image model accepts.
+    /// The sizes OpenAI recommends.
     static let standardPresets: [ImageSize] = [.auto, .square, .landscape, .portrait]
 
-    /// Extra presets for models that accept custom sizes.
+    /// Larger and wider presets.
     static let extendedPresets: [ImageSize] = [
         ImageSize(width: 1536, height: 864),
         ImageSize(width: 864, height: 1536),
@@ -521,11 +505,7 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
         if !settings.model.supportsComplexity {
             settings.complexity = GenerationSettings().complexity
         }
-        if settings.model.supportsCustomSizes {
-            if !settings.size.isAuto, !settings.size.isValidCustomSize { settings.size = .auto }
-        } else if !ImageSize.standardPresets.contains(settings.size) {
-            settings.size = .auto
-        }
+        if !settings.size.isAuto, !settings.size.isValidCustomSize { settings.size = .auto }
         if settings.background == .transparent, !settings.outputFormat.supportsTransparency {
             settings.outputFormat = .png
         }

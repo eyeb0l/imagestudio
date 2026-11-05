@@ -56,7 +56,7 @@ struct GenerationSettingsTests {
     @Test func downgradesQualityForOlderModels() {
         var settings = GenerationSettings()
         settings.quality = .max
-        settings.model = .gptImage15
+        settings.model = .gptImage2
         #expect(settings.normalized().quality == .high)
     }
 
@@ -86,18 +86,32 @@ struct GenerationSettingsTests {
     @Test func extendedQualityOnGPTImage26() {
         for model in [ImageModel.flare26, .sunburst26] {
             #expect(model.supportedQualities == ImageQuality.allCases)
-            #expect(model.supportsCustomSizes)
         }
     }
 
-    @Test func resetsCustomSizeForFixedSizeModels() {
+    @Test func resetsInvalidSizes() {
         var settings = GenerationSettings()
-        settings.size = ImageSize(width: 3840, height: 2160)
-        settings.model = .gptImage1Mini
+        settings.size = ImageSize(width: 1000, height: 1000)
         #expect(settings.normalized().size == .auto)
 
-        settings.size = .portrait
-        #expect(settings.normalized().size == .portrait)
+        settings.size = ImageSize(width: 3840, height: 2160)
+        #expect(settings.normalized().size == ImageSize(width: 3840, height: 2160))
+    }
+
+    @Test(arguments: ["gpt-image-1.5", "gpt-image-1-mini"])
+    func settingsSavedWithARetiredModelFallBack(id: String) throws {
+        let json = #"{"model":"\#(id)","quality":"high"}"#
+        let settings = try JSONDecoder().decode(GenerationSettings.self, from: Data(json.utf8))
+        #expect(settings.model == .flare26)
+        #expect(settings.quality == .high)
+    }
+
+    @Test func imagesFromARetiredModelKeepTheirNameAndRegenerateWithTheDefault() {
+        let image = GeneratedImage(prompt: "p", settings: GenerationSettings(), width: 1, height: 1, fileName: "f.png",
+                                   fileSize: 1, batchID: UUID(), duration: 1)
+        image.modelID = "gpt-image-1.5"
+        #expect(image.modelDisplayName == "gpt-image-1.5")
+        #expect(image.settings.model == GenerationSettings().model)
     }
 
     @Test func transparencyForcesCompatibleFormat() {

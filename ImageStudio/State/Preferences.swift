@@ -121,7 +121,7 @@ final class Composer {
     ///
     /// While something is held back the draft is kept as it stands, not normalised for the format
     /// or model held back: the edit is for what's being sent, and may use options they don't have
-    /// (a count above one SVG, a quality GPT Image 1.5 lacks). They apply again when released, and
+    /// (a count above one SVG, a quality GPT Image 2 lacks). They apply again when released, and
     /// a conflict then resolves as usual: a transparent background chosen in the meantime can't be
     /// a GIF, so it becomes a PNG.
     func applyEdit(_ edited: GenerationSettings, defaults: GenerationSettings) {

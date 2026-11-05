@@ -138,7 +138,7 @@ struct MarkupRequestTests {
 
     @Test func aRequestWithMarkupUsesAModelThatSupportsIt() {
         var settings = GenerationSettings()
-        settings.model = .gptImage15
+        settings.model = .gptImage2
         let body = OpenAIImageClient.editRequestBody(prompt: "x", settings: settings, references: references, markup: markup, boundary: "B")
         #expect(String(decoding: body, as: UTF8.self).contains("name=\"model\"\r\n\r\ngpt-image-2.6-flare\r\n"))
     }
@@ -791,10 +791,10 @@ struct MarkupModelTests {
 
     @Test func normalisingWithMarkupCoercesTheModelFirst() {
         var settings = GenerationSettings()
-        settings.model = .gptImage15
+        settings.model = .gptImage2
         settings.quality = .xhigh
         settings.size = ImageSize(width: 2048, height: 2048)
-        // Without markup, these aren't valid for GPT Image 1.5.
+        // Without markup, these aren't valid for GPT Image 2.
         #expect(settings.normalized(hasReferences: true).quality == .high)
         let marked = settings.normalized(hasReferences: true, hasMarkup: true)
         #expect(marked.model == .flare26)
@@ -838,19 +838,19 @@ struct MarkupModelTests {
         let composer = try await composerWithMarkup()
         defer { composer.replaceReferences(withCopiesOf: []) }
         var defaults = GenerationSettings()
-        defaults.model = .gptImage15
+        defaults.model = .gptImage2
 
         var edited = composer.settings(defaults: defaults)
         edited.quality = .xhigh
         composer.applyEdit(edited, defaults: defaults)
 
-        // What's sent keeps the edit, which GPT Image 1.5 itself couldn't have.
+        // What's sent keeps the edit, which GPT Image 2 itself couldn't have.
         #expect(composer.settings(defaults: defaults).model == .flare26)
         #expect(composer.settings(defaults: defaults).quality == .xhigh)
-        #expect(composer.draftSettings(defaults: defaults).model == .gptImage15)
+        #expect(composer.draftSettings(defaults: defaults).model == .gptImage2)
 
         composer.removeMarkup()
-        #expect(composer.settings(defaults: defaults).model == .gptImage15)
+        #expect(composer.settings(defaults: defaults).model == .gptImage2)
         #expect(composer.settings(defaults: defaults).quality == .high)
     }
 

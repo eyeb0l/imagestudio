@@ -212,23 +212,17 @@ struct SizePickerView: View {
             } else {
                 Section {
                     ForEach(ImageSize.standardPresets) { row(for: $0) }
+                }
+
+                Section {
+                    ForEach(ImageSize.extendedPresets) { row(for: $0) }
+                } header: {
+                    Text("More Sizes")
                 } footer: {
-                    if !settings.model.supportsCustomSizes {
-                        Text("Larger and custom sizes are available with GPT Image 2 and later.")
-                    }
+                    Text("Sizes above 2560 × 1440 are experimental.")
                 }
 
-                if settings.model.supportsCustomSizes {
-                    Section {
-                        ForEach(ImageSize.extendedPresets) { row(for: $0) }
-                    } header: {
-                        Text("More Sizes")
-                    } footer: {
-                        Text("Sizes above 2560 × 1440 are experimental.")
-                    }
-
-                    customSection
-                }
+                customSection
             }
         }
         .navigationTitle(showsOnlyCustomSize ? "Custom Size" : "Size")

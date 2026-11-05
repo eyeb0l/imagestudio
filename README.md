@@ -51,8 +51,6 @@ xcodebuild -scheme ImageStudio -destination 'platform=iOS Simulator,name=iPhone 
 | GPT Image 2.5 Flare | Presets, 2K/4K, custom | Auto, Low–High, Extra High, Max | — | PNG, JPEG, WebP |
 | GPT Image 2.5 Sunburst | Presets, 2K/4K, custom | Auto, Low–High, Extra High, Max | — | PNG, JPEG, WebP |
 | GPT Image 2 | Presets, 2K/4K, custom | Auto, Low–High | — | PNG, JPEG, WebP |
-| GPT Image 1.5 | 1024², 1536×1024, 1024×1536 | Auto, Low–High | — | PNG, JPEG, WebP |
-| GPT Image 1 Mini | 1024², 1536×1024, 1024×1536 | Auto, Low–High | — | PNG, JPEG, WebP |
 
 Custom sizes must use multiples of 16, have an aspect ratio between 1:3 and 3:1, and fall between 655,360 and 8,294,400 pixels (at most 3840 px per side). Sizes above 2560×1440 are experimental. A GIF's frame count, frame size and image count must also fit OpenAI's total pixel budget; if a request is rejected, reduce one of them. When you switch models, unsupported options fall back to valid values automatically. Model capabilities live in `ImageStudio/Models/GenerationSettings.swift`.
 

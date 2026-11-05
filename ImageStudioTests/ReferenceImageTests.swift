@@ -91,8 +91,8 @@ struct EditRequestTests {
 
     @Test func buildsMultipartBody() throws {
         var settings = GenerationSettings()
-        settings.model = .gptImage15
-        settings.quality = .xhigh // not supported by 1.5; should be normalised to high
+        settings.model = .gptImage2
+        settings.quality = .xhigh // not supported by GPT Image 2; should be normalised to high
         settings.outputFormat = .jpeg
         settings.compression = 80
         settings.count = 2
@@ -111,13 +111,13 @@ struct EditRequestTests {
             return String(text[start..<end])
         }
 
-        #expect(field("model") == "gpt-image-1.5")
+        #expect(field("model") == "gpt-image-2")
         #expect(field("prompt") == "Put the cat in a hat ✨")
         #expect(field("n") == "2")
         #expect(field("quality") == "high")
         #expect(field("output_format") == "jpeg")
         #expect(field("output_compression") == "80")
-        #expect(field("complexity") == nil) // not supported by 1.5
+        #expect(field("complexity") == nil) // not supported by GPT Image 2
         #expect(text.components(separatedBy: "name=\"image[]\"").count - 1 == 2)
         #expect(text.contains("filename=\"reference-2.png\"\r\nContent-Type: image/png\r\n\r\n"))
         #expect(text.hasPrefix("--B\r\n"))

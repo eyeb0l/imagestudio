@@ -108,9 +108,7 @@ struct ComposerBar: View {
 
         Menu {
             // First, as this menu scrolls and a button at the end of it doesn't respond.
-            if settings.model.supportsCustomSizes {
-                Button("Custom Size…", systemImage: "square.dashed") { showingCustomSize = true }
-            }
+            Button("Custom Size…", systemImage: "square.dashed") { showingCustomSize = true }
             Picker("Size", selection: binding(\.size)) {
                 ForEach(sizeOptions(for: settings)) { size in
                     Text(size.isAuto ? "Auto" : "\(size.title)  \(size.dimensionsLabel)").tag(size)
