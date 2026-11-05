@@ -342,3 +342,104 @@ struct LibraryDeletionTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 }
+
+@Suite("Failure log")
+struct GenerationFailureLogTests {
+    private let url = URL(string: "https://api.openai.com/v1/images/generations")!
+    private let started = Date(timeIntervalSince1970: 1_000)
+
+    private func ticket(attempt: Int = 2, attemptStartedAt: Date? = nil) -> GenerationTicket {
+        var ticket = GenerationTicket(jobID: UUID(), prompt: "A logo", settings: GenerationSettings(), startedAt: started, attempt: attempt)
+        ticket.attemptStartedAt = attemptStartedAt
+        return ticket
+    }
+
+    private func response(_ status: Int, _ headers: [String: String] = [:]) -> HTTPURLResponse {
+        HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
+    }
+
+    @Test func recordsAGatewayFailure() {
+        let page = Data("<html>\r\n  <head><title>502 Bad Gateway</title></head>\r\n</html>".utf8)
+        let log = GenerationAttemptLog(ticket: ticket(attemptStartedAt: started.addingTimeInterval(100)),
+                                       response: response(502, ["Server": "cloudflare", "CF-Ray": "abc-LHR", "Content-Type": "text/html"]),
+                                       data: page, finishedAt: started.addingTimeInterval(190))
+        #expect(log.attempt == 2)
+        #expect(log.duration == 90)
+        #expect(log.status == 502)
+        #expect(log.requestID == nil)
+        #expect(log.server == "cloudflare")
+        #expect(log.rayID == "abc-LHR")
+        #expect(log.contentType == "text/html")
+        #expect(log.responseExcerpt == "<html> <head><title>502 Bad Gateway</title></head> </html>")
+    }
+
+    @Test func recordsOpenAIsRequestDetails() {
+        let log = GenerationAttemptLog(ticket: ticket(), response: response(500, ["x-request-id": "req_123", "openai-processing-ms": "4100"]),
+                                       data: Data(#"{"error":{"message":"Oops"}}"#.utf8))
+        #expect(log.requestID == "req_123")
+        #expect(log.processingMilliseconds == 4100)
+    }
+
+    @Test func recordsAnAttemptWithNoResponse() {
+        let log = GenerationAttemptLog(ticket: ticket(), response: nil, data: Data(), finishedAt: started.addingTimeInterval(5))
+        #expect(log.status == nil)
+        #expect(log.resultLabel == "No response")
+        #expect(log.responseExcerpt == nil)
+        #expect(log.duration == 5) // falls back to the job's start
+    }
+
+    @Test func masksAnythingThatLooksLikeAKey() {
+        let body = Data(#"{"error":{"message":"Incorrect API key provided: sk-proj-abc123_XYZ. Check it."}}"#.utf8)
+        let excerpt = GenerationAttemptLog.excerpt(of: body)
+        #expect(excerpt?.contains("sk-proj") == false)
+        #expect(excerpt?.contains("abc123") == false)
+        #expect(excerpt?.contains("Incorrect API key") == true)
+    }
+
+    @Test func limitsTheExcerpt() throws {
+        let excerpt = try #require(GenerationAttemptLog.excerpt(of: Data(repeating: 65, count: 5000)))
+        #expect(excerpt.count == GenerationAttemptLog.maxExcerptLength)
+    }
+
+    @Test func aLogKeepsTheMostRecentAttempts() {
+        var log: [GenerationAttemptLog] = []
+        for attempt in 1...20 {
+            log = GenerationFailureReport.appending(GenerationAttemptLog(ticket: ticket(attempt: attempt), response: nil, data: Data()), to: log)
+        }
+        #expect(log.count == GenerationFailureReport.maxAttempts)
+        #expect(log.last?.attempt == 20)
+    }
+
+    @Test func aReportHasWhatSupportNeedsAndNoKey() {
+        var settings = GenerationSettings()
+        settings.outputFormat = .svg
+        var attempt = GenerationAttemptLog(ticket: ticket(), response: response(502, ["x-request-id": "req_9", "Authorization": "Bearer sk-secret"]), data: Data("Bad Gateway".utf8))
+        attempt.message = "OpenAI returned an error (HTTP 502)"
+        let text = GenerationFailureReport.text(prompt: "Spoke & Chain", settings: settings, referenceCount: 0, hasMarkup: false,
+                                                message: "after 3 attempts", attempts: [attempt])
+        for expected in ["Attempt 2", "HTTP 502", "req_9", "Bad Gateway", "Spoke & Chain", "svg", "gpt-image-2.6-flare", "gpt-6.1-terra", "after 3 attempts"] {
+            #expect(text.contains(expected), "\(expected)")
+        }
+        #expect(!text.contains("sk-secret"))
+    }
+
+    @Test func survivesInARecord() {
+        let record = PendingGeneration(id: UUID(), prompt: "p", settings: GenerationSettings(), startedAt: started)
+        #expect(record.attemptLog.isEmpty)
+        #expect(record.attemptLogData == nil)
+        let attempt = GenerationAttemptLog(ticket: ticket(), response: response(502), data: Data("x".utf8))
+        record.attemptLog = [attempt]
+        #expect(record.attemptLog == [attempt])
+    }
+
+    @Test func ticketsWithoutAnAttemptStartDecode() throws {
+        var saved = ticket()
+        saved.attemptStartedAt = started
+        let data = try JSONEncoder().encode(saved)
+        #expect(try JSONDecoder().decode(GenerationTicket.self, from: data).attemptStartedAt == started)
+        var dictionary = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        dictionary["attemptStartedAt"] = nil
+        let old = try JSONSerialization.data(withJSONObject: dictionary)
+        #expect(try JSONDecoder().decode(GenerationTicket.self, from: old).attemptStartedAt == nil)
+    }
+}

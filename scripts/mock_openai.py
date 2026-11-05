@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local stand-in for the OpenAI Image API, for testing without spending credit.
 
-Usage: python3 scripts/mock_openai.py [delay-seconds] [fail-first-n] [gif-error-status]   (listens on 127.0.0.1:8765)
+Usage: python3 scripts/mock_openai.py [delay-seconds] [fail-first-n] [gif-error-status] [fail-first-status]   (listens on 127.0.0.1:8765)
 fail-first-n: answer the first N generation requests with 503 + Retry-After: 2 (to exercise retries).
+fail-first-status: use 502 to answer those as a gateway does instead: an HTML page with no OpenAI request ID.
 gif-error-status: answer GIF requests with this status, e.g. 403 (no preview access) or 400 (over the pixel budget).
 SVG requests get a real SVG. A prompt containing "malformed" or "hostile" gets a broken or misbehaving document instead.
 Then launch a DEBUG build with: -OpenAIBaseURL http://127.0.0.1:8765/v1
@@ -16,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DELAY = float(sys.argv[1]) if len(sys.argv) > 1 else 20
 FAIL_FIRST = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 GIF_ERROR = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+FAIL_STATUS = int(sys.argv[4]) if len(sys.argv) > 4 else 503
 failures = 0
 
 # Request fields echoed to the log, in order. Add new options here.
@@ -292,6 +294,13 @@ class H(BaseHTTPRequestHandler):
         global failures
         if failures < FAIL_FIRST:
             failures += 1
+            if FAIL_STATUS == 502:
+                time.sleep(DELAY)
+                page = b"<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body><center><h1>502 Bad Gateway</h1></center></body></html>"
+                self.send_response(502); self.send_header("Content-Type", "text/html"); self.send_header("CF-Ray", "mock-ray-LHR")
+                self.send_header("Content-Length", str(len(page))); self.end_headers(); self.wfile.write(page)
+                print("  502 (failure", failures, "of", FAIL_FIRST, ")", flush=True)
+                return
             payload = json.dumps({"error": {"message": "The server is overloaded.", "type": "server_error", "code": None}}).encode()
             self.send_response(503); self.send_header("Content-Type", "application/json"); self.send_header("Retry-After", "2")
             self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)

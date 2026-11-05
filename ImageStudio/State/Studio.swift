@@ -33,6 +33,8 @@ final class Studio {
         let references: [String]
         /// The annotation layer (see `MarkupStore`) for the first reference, if any.
         let markupFileName: String?
+        /// The failed attempts so far, and what the server said.
+        var attemptLog: [GenerationAttemptLog] = []
 
         init(id: UUID = UUID(), prompt: String, settings: GenerationSettings,
              startedAt: Date = .now, state: State = .running, attempt: Int = 1, references: [String] = [],
@@ -103,17 +105,19 @@ final class Studio {
             records = []
         }
         jobs = records.map { record in
-            Job(id: record.id, prompt: record.prompt, settings: record.settings, startedAt: record.startedAt,
-                state: record.failureMessage.map { .failed($0) } ?? .running, attempt: record.attempt,
-                references: record.referenceFileNames, markupFileName: record.markupFileName)
+            var job = Job(id: record.id, prompt: record.prompt, settings: record.settings, startedAt: record.startedAt,
+                          state: record.failureMessage.map { .failed($0) } ?? .running, attempt: record.attempt,
+                          references: record.referenceFileNames, markupFileName: record.markupFileName)
+            job.attemptLog = record.attemptLog
+            return job
         }
 
         // Nothing else holds references at launch (the composer starts empty), so any file not
         // used by an image or a job is left over, e.g. from an attachment that was never sent.
         removeOrphanedReferences(referencedFileNames())
 
-        session.setResultHandler { [weak self] ticket, outcome, retryAfter in
-            await self?.handle(ticket, outcome, retryAfter: retryAfter)
+        session.setResultHandler { [weak self] ticket, outcome, retryAfter, attemptLog in
+            await self?.handle(ticket, outcome, retryAfter: retryAfter, attemptLog: attemptLog)
         }
 
         let restoredRunning = jobs.filter { !$0.isFailed }.map(\.id)
@@ -202,22 +206,24 @@ final class Studio {
 
     /// Called for every finished request — including ones started before the app was relaunched.
     private func handle(_ ticket: GenerationTicket, _ outcome: GenerationSession.Outcome,
-                        retryAfter: TimeInterval?) async {
+                        retryAfter: TimeInterval?, attemptLog: GenerationAttemptLog?) async {
         switch outcome {
         case .success(let output):
             await finish(output, for: ticket)
         case .failure(let error):
             // No job means the user cancelled or dismissed it; nothing to report.
             guard jobs.contains(where: { $0.id == ticket.jobID }) else { return }
-            handleFailure(error, for: ticket, retryAfter: retryAfter)
+            handleFailure(error, for: ticket, retryAfter: retryAfter, attemptLog: attemptLog)
         }
         // After a background relaunch the app may be suspended once this returns, so make sure the
         // Live Activity update and notification have gone out.
         await observer?.settle()
     }
 
-    private func handleFailure(_ error: any Error, for ticket: GenerationTicket, retryAfter: TimeInterval?) {
+    private func handleFailure(_ error: any Error, for ticket: GenerationTicket, retryAfter: TimeInterval?,
+                               attemptLog: GenerationAttemptLog?) {
         var message = Self.message(for: error, settings: ticket.settings)
+        record(attemptLog, message: message, jobID: ticket.jobID)
 
         if let delay = RetryPolicy.retryDelay(after: error, attempt: ticket.attempt, retryAfter: retryAfter) {
             // A new background task with an earliest start date, so it also runs if the app is
@@ -239,6 +245,14 @@ final class Studio {
             message = RetryPolicy.exhaustedMessage(message, attempts: ticket.attempt)
         }
         markFailed(ticket.jobID, message: message)
+    }
+
+    /// Adds an attempt to its job's log. `handleFailure` then saves the job, whatever comes next.
+    private func record(_ attemptLog: GenerationAttemptLog?, message: String, jobID: Job.ID) {
+        guard var attemptLog, let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        attemptLog.message = message
+        jobs[index].attemptLog = GenerationFailureReport.appending(attemptLog, to: jobs[index].attemptLog)
+        Self.log.error("Attempt \(attemptLog.attempt) failed: \(attemptLog.resultLabel, privacy: .public) after \(Int(attemptLog.duration))s, request \(attemptLog.requestID ?? "none", privacy: .public)")
     }
 
     /// Saves a finished result to the library, then clears the job.
@@ -408,6 +422,7 @@ final class Studio {
         }
         record.startedAt = job.startedAt
         record.attempt = job.attempt
+        record.attemptLog = job.attemptLog
         if case .failed(let message) = job.state {
             record.failureMessage = message
         } else {

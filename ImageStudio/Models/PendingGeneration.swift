@@ -17,6 +17,8 @@ final class PendingGeneration {
     var referenceFileNames: [String] = []
     /// The annotation layer (see `MarkupStore`) sent with the request, if any.
     var markupFileName: String?
+    /// Encoded `[GenerationAttemptLog]`: the failed attempts so far. `nil` for none.
+    var attemptLogData: Data?
 
     init(id: UUID, prompt: String, settings: GenerationSettings, startedAt: Date,
          failureMessage: String? = nil, attempt: Int = 1, referenceFileNames: [String] = [],
@@ -33,6 +35,11 @@ final class PendingGeneration {
 }
 
 extension PendingGeneration {
+    var attemptLog: [GenerationAttemptLog] {
+        get { attemptLogData.flatMap { try? JSONDecoder().decode([GenerationAttemptLog].self, from: $0) } ?? [] }
+        set { attemptLogData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
+    }
+
     var settings: GenerationSettings {
         get { (try? JSONDecoder().decode(GenerationSettings.self, from: settingsData)) ?? GenerationSettings() }
         set { settingsData = (try? JSONEncoder().encode(newValue)) ?? settingsData }

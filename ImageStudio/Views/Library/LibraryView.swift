@@ -17,6 +17,7 @@ struct LibraryView: View {
     @State private var pendingDeletion: [GeneratedImage] = []
     @State private var showingDeleteConfirmation = false
     @State private var inspectedJob: Studio.Job?
+    @State private var failureDetailsJob: Studio.Job?
     @State private var toast: Toast?
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @FocusState private var composerFocused: Bool
@@ -61,8 +62,10 @@ struct LibraryView: View {
                 endSelection()
             }
         }
+        .sheet(item: $failureDetailsJob) { GenerationFailureView(job: $0) }
         .alert("Generation Failed", isPresented: inspectingJob, presenting: inspectedJob) { job in
             Button("Retry") { studio.retry(job) }
+            Button("Details") { failureDetailsJob = job }
             Button("Edit Prompt") {
                 composer.prompt = job.prompt
                 composer.setSettings(job.settings, defaults: preferences.defaults)
