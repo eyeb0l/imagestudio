@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 extension GeneratedImage {
     /// Whether the original file is still on disk. Export and copy need it.
@@ -10,9 +11,14 @@ extension GeneratedImage {
     /// Copies the original file to the pasteboard, preserving its format. Returns `false`
     /// if the file couldn't be read.
     @discardableResult
-    func copyToPasteboard() -> Bool {
+    func copyToPasteboard(_ pasteboard: UIPasteboard = .general) -> Bool {
         guard let data = try? Data(contentsOf: fileURL) else { return false }
-        UIPasteboard.general.setData(data, forPasteboardType: format.contentType.identifier)
+        var item: [String: Any] = [format.contentType.identifier: data]
+        // An SVG is also text, which is what a code editor or a note will want to paste.
+        if format.isVector, let text = String(data: data, encoding: .utf8) {
+            item[UTType.utf8PlainText.identifier] = text
+        }
+        pasteboard.items = [item]
         return true
     }
 }
@@ -23,6 +29,9 @@ struct ImageContextMenu: View {
     var onRegenerate: () -> Void
     var onReusePrompt: () -> Void
     var onUseAsReference: () -> Void
+    var onMarkUp: () -> Void
+    /// Whether the composer has room for another reference, which Mark Up needs.
+    var hasReferenceSlot = true
     var onSelect: (() -> Void)?
     var onDelete: () -> Void
     var onNotice: (Toast) -> Void = { _ in }
@@ -40,7 +49,9 @@ struct ImageContextMenu: View {
         Button("Regenerate", systemImage: "arrow.clockwise", action: onRegenerate)
         Button("Reuse Prompt", systemImage: "text.cursor", action: onReusePrompt)
         Button("Use as Reference", systemImage: "photo.badge.plus", action: onUseAsReference)
-            .disabled(!available)
+            .disabled(!available || !image.format.canBeReference)
+        Button("Mark Up", systemImage: "pencil.tip.crop.circle", action: onMarkUp)
+            .disabled(!available || !image.format.canBeReference || !hasReferenceSlot)
         if let onSelect {
             Button("Select", systemImage: "checkmark.circle", action: onSelect)
         }

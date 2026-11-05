@@ -4,11 +4,15 @@ import SwiftUI
 struct GenerationOptionsForm: View {
     @Binding var settings: GenerationSettings
     var header: String = "Generation"
+    /// Whether the settings are for a request with reference images, which limits the formats.
+    var hasReferences = false
+    /// Whether the settings are for a request with markup, which limits the models.
+    var hasMarkup = false
 
     var body: some View {
-        Section(header) {
+        Section {
             NavigationLink {
-                ModelPickerView(selection: modelBinding)
+                ModelPickerView(selection: modelBinding, models: ImageModel.available(hasMarkup: hasMarkup))
             } label: {
                 LabeledContent("Model", value: settings.model.displayName)
             }
@@ -25,8 +29,29 @@ struct GenerationOptionsForm: View {
                 }
             }
 
-            Stepper(value: $settings.count, in: GenerationSettings.countRange) {
+            if settings.model.supportsComplexity {
+                Picker("Complexity", selection: $settings.complexity) {
+                    ForEach(ImageComplexity.allCases) { Text($0.displayName).tag($0) }
+                }
+            }
+
+            Stepper(value: $settings.count, in: settings.allowedCountRange) {
                 LabeledContent("Images", value: settings.count.formatted())
+            }
+            .disabled(!settings.outputFormat.allowsMultipleImages)
+        } header: {
+            Text(header)
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                if hasMarkup {
+                    Text("Markup works with GPT Image 2.5 and 2.6.")
+                }
+                if settings.outputFormat == .svg {
+                    Text("SVG makes one image per request. Quality and complexity apply to the reference image OpenAI creates first, then a second model writes the SVG.")
+                }
+                if settings.model.supportsComplexity {
+                    Text("Complexity sets how much the model plans before rendering. Higher helps with dense text and complex layouts, but can take longer and introduce unwanted changes.")
+                }
             }
         }
 
@@ -36,7 +61,13 @@ struct GenerationOptionsForm: View {
             }
 
             Picker("Format", selection: formatBinding) {
-                ForEach(OutputFormat.allCases) { Text($0.displayName).tag($0) }
+                ForEach(settings.model.formats(hasReferences: hasReferences)) { Text($0.displayName).tag($0) }
+            }
+
+            if settings.outputFormat.isVector {
+                Picker("SVG Author", selection: $settings.svgAuthor) {
+                    ForEach(SVGAuthorModel.allCases) { Text($0.displayName).tag($0) }
+                }
             }
 
             if settings.outputFormat.supportsCompression {
@@ -52,8 +83,41 @@ struct GenerationOptionsForm: View {
         } header: {
             Text("Output")
         } footer: {
-            Text("Transparent backgrounds need PNG or WebP. Low moderation applies less restrictive content filtering.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Transparent backgrounds need PNG or WebP. Low moderation applies less restrictive content filtering.")
+                if let unavailableFormatsNote {
+                    Text(unavailableFormatsNote)
+                }
+            }
         }
+
+        if settings.outputFormat.isAnimated {
+            Section {
+                Stepper(value: $settings.frameCount, in: GenerationSettings.frameCountRange) {
+                    LabeledContent("Frames", value: settings.frameCount.formatted())
+                }
+                Stepper(value: $settings.frameDurationMs, in: GenerationSettings.frameDurationRange,
+                        step: GenerationSettings.frameDurationStep) {
+                    LabeledContent("Frame Duration", value: "\(settings.frameDurationMs.formatted()) ms")
+                }
+            } header: {
+                Text("Animation")
+            } footer: {
+                Text("Each loop lasts \(loopSeconds) s. If a request is too large, reduce the frames, size or number of images.")
+            }
+        }
+    }
+
+    /// Says which of the model's formats reference images rule out, if any.
+    private var unavailableFormatsNote: String? {
+        guard hasReferences else { return nil }
+        let unavailable = settings.model.supportedFormats.filter { !settings.model.formats(hasReferences: true).contains($0) }
+        guard !unavailable.isEmpty else { return nil }
+        return "\(unavailable.map(\.displayName).formatted(.list(type: .or))) can't be used with reference images."
+    }
+
+    private var loopSeconds: String {
+        (Double(settings.frameCount * settings.frameDurationMs) / 1000).formatted(.number.precision(.fractionLength(0...2)))
     }
 
     // Bindings that keep combinations valid.
@@ -62,25 +126,26 @@ struct GenerationOptionsForm: View {
         Binding(get: { settings.model }, set: { model in
             var updated = settings
             updated.model = model
-            settings = updated.normalized()
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
     private var backgroundBinding: Binding<ImageBackground> {
         Binding(get: { settings.background }, set: { background in
-            settings.background = background
-            if background == .transparent, !settings.outputFormat.supportsTransparency {
-                settings.outputFormat = .png
-            }
+            var updated = settings
+            updated.background = background
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
     private var formatBinding: Binding<OutputFormat> {
         Binding(get: { settings.outputFormat }, set: { format in
-            settings.outputFormat = format
-            if !format.supportsTransparency, settings.background == .transparent {
-                settings.background = .auto
+            var updated = settings
+            updated.outputFormat = format
+            if !format.supportsTransparency, updated.background == .transparent {
+                updated.background = .auto
             }
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
@@ -93,10 +158,11 @@ struct GenerationOptionsForm: View {
 
 struct ModelPickerView: View {
     @Binding var selection: ImageModel
+    var models = ImageModel.allCases
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        List(ImageModel.allCases) { model in
+        List(models) { model in
             Button {
                 selection = model
                 dismiss()
@@ -129,22 +195,25 @@ struct ModelPickerView: View {
 
 struct SizePickerView: View {
     @Binding var settings: GenerationSettings
+    /// Opened just to enter a custom size, so that's all it shows, ready to type in.
+    var showsOnlyCustomSize = false
+    /// Called when a custom size is chosen, for a sheet that was opened just to do that.
+    var onCustomSizeChosen: () -> Void = {}
 
     @State private var customWidth = ""
     @State private var customHeight = ""
-    @FocusState private var customFocused: Bool
+    private enum CustomField { case width, height }
+    @FocusState private var focusedField: CustomField?
 
     var body: some View {
         List {
-            Section {
-                ForEach(ImageSize.standardPresets) { row(for: $0) }
-            } footer: {
-                if !settings.model.supportsCustomSizes {
-                    Text("Larger and custom sizes are available with GPT Image 2 and later.")
+            if showsOnlyCustomSize {
+                customSection
+            } else {
+                Section {
+                    ForEach(ImageSize.standardPresets) { row(for: $0) }
                 }
-            }
 
-            if settings.model.supportsCustomSizes {
                 Section {
                     ForEach(ImageSize.extendedPresets) { row(for: $0) }
                 } header: {
@@ -156,7 +225,7 @@ struct SizePickerView: View {
                 customSection
             }
         }
-        .navigationTitle("Size")
+        .navigationTitle(showsOnlyCustomSize ? "Custom Size" : "Size")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             let isPreset = settings.model.sizePresets.contains(settings.size)
@@ -164,6 +233,7 @@ struct SizePickerView: View {
                 customWidth = String(settings.size.width)
                 customHeight = String(settings.size.height)
             }
+            if showsOnlyCustomSize { focusedField = .width }
         }
     }
 
@@ -209,18 +279,19 @@ struct SizePickerView: View {
             HStack {
                 TextField("Width", text: $customWidth)
                     .keyboardType(.numberPad)
-                    .focused($customFocused)
+                    .focused($focusedField, equals: .width)
                 Text("×").foregroundStyle(.secondary)
                 TextField("Height", text: $customHeight)
                     .keyboardType(.numberPad)
-                    .focused($customFocused)
+                    .focused($focusedField, equals: .height)
                     .multilineTextAlignment(.trailing)
             }
             .font(.body.monospacedDigit())
 
             Button(settings.size == candidate ? "Using Custom Size" : "Use Custom Size") {
                 settings.size = candidate
-                customFocused = false
+                focusedField = nil
+                onCustomSizeChosen()
             }
             .disabled(message != nil || settings.size == candidate)
         } header: {

@@ -13,19 +13,27 @@ nonisolated struct GenerationTicket: Codable, Sendable, Equatable {
     var attempt: Int = 1
     /// Reference images (in `ReferenceStore`). Non-empty requests go to `/images/edits`.
     var referenceFileNames: [String] = []
+    /// The annotation layer (see `MarkupStore`) for the first reference. Tickets from before
+    /// markup existed decode as `nil`.
+    var markupFileName: String?
+    /// When this attempt was sent, or due to be, for the failure log.
+    var attemptStartedAt: Date?
 
     init(jobID: UUID, prompt: String, settings: GenerationSettings, startedAt: Date, attempt: Int = 1,
-         referenceFileNames: [String] = []) {
+         referenceFileNames: [String] = [], markupFileName: String? = nil) {
         self.jobID = jobID
         self.prompt = prompt
-        self.settings = settings
+        // Reference images send the request to /images/edits, so its settings must suit that endpoint.
+        // This also keeps the saved file's extension in step with what the request asks for.
+        self.settings = settings.normalized(hasReferences: !referenceFileNames.isEmpty, hasMarkup: markupFileName != nil)
         self.startedAt = startedAt
         self.attempt = attempt
         self.referenceFileNames = referenceFileNames
+        self.markupFileName = markupFileName
     }
 
     private enum CodingKeys: String, CodingKey {
-        case jobID, prompt, settings, startedAt, attempt, referenceFileNames
+        case jobID, prompt, settings, startedAt, attempt, referenceFileNames, markupFileName, attemptStartedAt
     }
 
     init(from decoder: any Decoder) throws {
@@ -36,8 +44,10 @@ nonisolated struct GenerationTicket: Codable, Sendable, Equatable {
             settings: try container.decode(GenerationSettings.self, forKey: .settings),
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             attempt: try container.decodeIfPresent(Int.self, forKey: .attempt) ?? 1,
-            referenceFileNames: try container.decodeIfPresent([String].self, forKey: .referenceFileNames) ?? []
+            referenceFileNames: try container.decodeIfPresent([String].self, forKey: .referenceFileNames) ?? [],
+            markupFileName: try container.decodeIfPresent(String.self, forKey: .markupFileName)
         )
+        attemptStartedAt = try container.decodeIfPresent(Date.self, forKey: .attemptStartedAt)
     }
 
     /// The same job, for the next request attempt.
@@ -56,13 +66,16 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
     static let shared = GenerationSession()
 
     typealias Outcome = Result<OpenAIImageClient.Output, any Error>
-    typealias ResultHandler = @MainActor @Sendable (GenerationTicket, Outcome, _ retryAfter: TimeInterval?) async -> Void
+    typealias ResultHandler = @MainActor @Sendable (GenerationTicket, Outcome, _ retryAfter: TimeInterval?,
+                                                    _ attemptLog: GenerationAttemptLog?) async -> Void
 
     private struct Delivery {
         let ticket: GenerationTicket
         let outcome: Outcome
         /// The server's `Retry-After` header, in seconds, if the response had one.
         let retryAfter: TimeInterval?
+        /// Details of the attempt, if it failed.
+        let attemptLog: GenerationAttemptLog?
     }
 
     private struct State {
@@ -115,29 +128,22 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
     /// Starts the request. With `notBefore`, the system holds it until then (used for retries),
     /// including while the app is suspended.
     func start(_ ticket: GenerationTicket, apiKey: String, notBefore: Date? = nil) throws {
+        var ticket = ticket
+        ticket.attemptStartedAt = notBefore ?? .now
         let bodyURL = Self.requestURL(for: ticket.jobID)
         try? FileManager.default.removeItem(at: Self.responseURL(for: ticket.jobID))
 
         let request: URLRequest
         if ticket.referenceFileNames.isEmpty {
+            // Text-only requests have nothing for markup to apply to.
+            guard ticket.markupFileName == nil else { throw MarkupStore.MarkupError.noReference }
             try OpenAIImageClient.requestBody(prompt: ticket.prompt, settings: ticket.settings)
                 .write(to: bodyURL, options: .atomic)
             request = OpenAIImageClient.generationRequest(apiKey: apiKey)
         } else {
             // With reference images the request goes to /images/edits as multipart form data.
-            let uploads = try ticket.referenceFileNames.enumerated().map { index, name in
-                guard ReferenceStore.fileExists(name) else { throw ReferenceStore.ImportError.missing }
-                let url = ReferenceStore.url(for: name)
-                return OpenAIImageClient.ReferenceUpload(
-                    fileName: "reference-\(index + 1).\(url.pathExtension)",
-                    mimeType: ReferenceStore.mimeType(for: name),
-                    data: try Data(contentsOf: url)
-                )
-            }
             let boundary = "ImageStudio-\(UUID().uuidString)"
-            try OpenAIImageClient.editRequestBody(prompt: ticket.prompt, settings: ticket.settings,
-                                                  references: uploads, boundary: boundary)
-                .write(to: bodyURL, options: .atomic)
+            try Self.editRequestBody(for: ticket, boundary: boundary).write(to: bodyURL, options: .atomic)
             request = OpenAIImageClient.editRequest(apiKey: apiKey, boundary: boundary)
         }
 
@@ -146,6 +152,26 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
         task.taskDescription = String(decoding: try JSONEncoder().encode(ticket), as: UTF8.self)
         task.earliestBeginDate = notBefore
         task.resume()
+    }
+
+    /// The multipart body for a request with reference images. Throws if a file it needs is
+    /// missing or unusable, so a request is never sent without its markup.
+    static func editRequestBody(for ticket: GenerationTicket, boundary: String) throws -> Data {
+        let uploads = try ticket.referenceFileNames.enumerated().map { index, name in
+            guard ReferenceStore.fileExists(name) else { throw ReferenceStore.ImportError.missing }
+            let url = ReferenceStore.url(for: name)
+            return OpenAIImageClient.ReferenceUpload(
+                fileName: "reference-\(index + 1).\(url.pathExtension)",
+                mimeType: ReferenceStore.mimeType(for: name),
+                data: try Data(contentsOf: url)
+            )
+        }
+        let markup = try ticket.markupFileName.map { overlay in
+            guard let first = ticket.referenceFileNames.first else { throw MarkupStore.MarkupError.noReference }
+            return try MarkupStore.upload(overlay: overlay, firstReference: first)
+        }
+        return OpenAIImageClient.editRequestBody(prompt: ticket.prompt, settings: ticket.settings,
+                                                 references: uploads, markup: markup, boundary: boundary)
     }
 
     func cancel(jobID: UUID) async {
@@ -191,10 +217,10 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
         }
 
         let outcome: Outcome
+        let data = (try? Data(contentsOf: responseURL)) ?? Data()
         if let error {
             outcome = .failure(error)
         } else if let response = task.response {
-            let data = (try? Data(contentsOf: responseURL)) ?? Data()
             outcome = Result { try OpenAIImageClient.parseGeneration(data: data, response: response) }
         } else {
             outcome = .failure(OpenAIError.invalidResponse)
@@ -202,7 +228,12 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
 
         try? FileManager.default.removeItem(at: responseURL)
         try? FileManager.default.removeItem(at: Self.requestURL(for: ticket.jobID))
-        deliver(Delivery(ticket: ticket, outcome: outcome, retryAfter: RetryPolicy.retryAfter(from: task.response)))
+        var attemptLog: GenerationAttemptLog?
+        if case .failure = outcome {
+            attemptLog = GenerationAttemptLog(ticket: ticket, response: task.response, data: data)
+        }
+        deliver(Delivery(ticket: ticket, outcome: outcome, retryAfter: RetryPolicy.retryAfter(from: task.response),
+                         attemptLog: attemptLog))
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -228,7 +259,7 @@ nonisolated final class GenerationSession: NSObject, URLSessionDataDelegate, @un
             let id = UUID()
             // Created under the lock so the task can't remove itself before it's recorded.
             state.processing[id] = Task { @MainActor in
-                await handler(delivery.ticket, delivery.outcome, delivery.retryAfter)
+                await handler(delivery.ticket, delivery.outcome, delivery.retryAfter, delivery.attemptLog)
                 _ = self.state.withLock { $0.processing.removeValue(forKey: id) }
             }
         }

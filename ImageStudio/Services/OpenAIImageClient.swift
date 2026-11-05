@@ -69,14 +69,28 @@ nonisolated enum RetryPolicy {
         }
     }
 
+    /// Whether a failure with this output format is worth sending again without being asked.
+    /// A 502 for an SVG has repeated on every attempt for a given prompt, after up to a minute's
+    /// work each time, so it's left to the user. Anything else transient is retried.
+    static func shouldRetryAutomatically(after error: any Error, format: OutputFormat) -> Bool {
+        guard isTransient(error) else { return false }
+        if format.isVector, isBadGateway(error) { return false }
+        return true
+    }
+
+    static func isBadGateway(_ error: any Error) -> Bool {
+        guard case .api(502, _, _) = error as? OpenAIError else { return false }
+        return true
+    }
+
     /// Seconds to wait before the next attempt, or `nil` if the job should fail instead.
     /// - Parameters:
     ///   - attempt: The attempt that just failed (1-based).
     ///   - retryAfter: The server's `Retry-After`, in seconds, if it sent one.
     ///   - jitter: A value in 0...1 that positions the delay within its random spread.
-    static func retryDelay(after error: any Error, attempt: Int, retryAfter: TimeInterval? = nil,
-                           jitter: Double = .random(in: 0...1)) -> TimeInterval? {
-        guard attempt < maxAttempts, isTransient(error) else { return nil }
+    static func retryDelay(after error: any Error, attempt: Int, format: OutputFormat = .png,
+                           retryAfter: TimeInterval? = nil, jitter: Double = .random(in: 0...1)) -> TimeInterval? {
+        guard attempt < maxAttempts, shouldRetryAutomatically(after: error, format: format) else { return nil }
         return delay(afterAttempt: attempt, retryAfter: retryAfter, jitter: jitter)
     }
 
@@ -145,6 +159,9 @@ nonisolated struct OpenAIImageClient: Sendable {
         var outputFormat: String?
         var inputTokens: Int?
         var outputTokens: Int?
+        /// What the model that wrote an SVG used, separately from the reference image.
+        var svgInputTokens: Int? = nil
+        var svgOutputTokens: Int? = nil
     }
 
     // MARK: Requests
@@ -176,10 +193,13 @@ nonisolated struct OpenAIImageClient: Sendable {
     }
 
     /// The multipart body for `/images/edits`: the same options as a generation, plus one
-    /// `image[]` part per reference image.
+    /// `image[]` part per reference image. Generation-only formats fall back, as this endpoint
+    /// rejects them, so there are no frame fields here. `markup` is an annotation layer for the
+    /// first reference, so that has to come first.
     static func editRequestBody(prompt: String, settings: GenerationSettings,
-                                references: [ReferenceUpload], boundary: String) -> Data {
-        let settings = settings.normalized()
+                                references: [ReferenceUpload], markup: ReferenceUpload? = nil,
+                                boundary: String) -> Data {
+        let settings = settings.normalized(hasReferences: true, hasMarkup: markup != nil)
         var fields: [(String, String)] = [
             ("model", settings.model.rawValue),
             ("prompt", prompt),
@@ -190,6 +210,9 @@ nonisolated struct OpenAIImageClient: Sendable {
             ("moderation", settings.moderation.rawValue),
             ("output_format", settings.outputFormat.rawValue),
         ]
+        if let complexity = settings.apiComplexity {
+            fields.append(("complexity", complexity))
+        }
         if settings.outputFormat.supportsCompression {
             fields.append(("output_compression", String(settings.compression)))
         }
@@ -199,11 +222,17 @@ nonisolated struct OpenAIImageClient: Sendable {
         for (name, value) in fields {
             append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n")
         }
-        for reference in references {
-            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"\(reference.fileName)\"\r\n")
-            append("Content-Type: \(reference.mimeType)\r\n\r\n")
-            body.append(reference.data)
+        func appendFile(_ upload: ReferenceUpload, name: String) {
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"; filename=\"\(upload.fileName)\"\r\n")
+            append("Content-Type: \(upload.mimeType)\r\n\r\n")
+            body.append(upload.data)
             append("\r\n")
+        }
+        for reference in references {
+            appendFile(reference, name: "image[]")
+        }
+        if let markup {
+            appendFile(markup, name: "markup")
         }
         append("--\(boundary)--\r\n")
         return body
@@ -227,15 +256,25 @@ nonisolated struct OpenAIImageClient: Sendable {
         let n: Int
         let size: String
         let quality: String
+        let complexity: String?
         let background: String
         let moderation: String
         let outputFormat: String
         let outputCompression: Int?
+        let frameCount: Int?
+        let frameDurationMs: Int?
+        let svg: SVGOptions?
+
+        struct SVGOptions: Encodable {
+            let model: String
+        }
 
         enum CodingKeys: String, CodingKey {
-            case model, prompt, n, size, quality, background, moderation
+            case model, prompt, n, size, quality, complexity, background, moderation, svg
             case outputFormat = "output_format"
             case outputCompression = "output_compression"
+            case frameCount = "frame_count"
+            case frameDurationMs = "frame_duration_ms"
         }
     }
 
@@ -247,10 +286,14 @@ nonisolated struct OpenAIImageClient: Sendable {
             n: settings.count,
             size: settings.size.apiValue,
             quality: settings.quality.rawValue,
+            complexity: settings.apiComplexity,
             background: settings.background.rawValue,
             moderation: settings.moderation.rawValue,
             outputFormat: settings.outputFormat.rawValue,
-            outputCompression: settings.outputFormat.supportsCompression ? settings.compression : nil
+            outputCompression: settings.outputFormat.supportsCompression ? settings.compression : nil,
+            frameCount: settings.apiFrameCount,
+            frameDurationMs: settings.apiFrameDurationMs,
+            svg: settings.apiSVGAuthor.map(RequestBody.SVGOptions.init(model:))
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
@@ -274,6 +317,7 @@ nonisolated struct OpenAIImageClient: Sendable {
         let background: String?
         let outputFormat: String?
         let usage: Usage?
+        let svgUsage: Usage?
     }
 
     private struct ErrorEnvelope: Decodable {
@@ -313,7 +357,9 @@ nonisolated struct OpenAIImageClient: Sendable {
             background: decoded.background,
             outputFormat: decoded.outputFormat,
             inputTokens: decoded.usage?.inputTokens,
-            outputTokens: decoded.usage?.outputTokens
+            outputTokens: decoded.usage?.outputTokens,
+            svgInputTokens: decoded.svgUsage?.inputTokens,
+            svgOutputTokens: decoded.svgUsage?.outputTokens
         )
     }
 

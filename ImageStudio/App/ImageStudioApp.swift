@@ -67,15 +67,18 @@ final class AppModel {
     @ObservationIgnored private let opener: @MainActor () throws -> ModelContainer
     @ObservationIgnored private let storeURL: URL
     @ObservationIgnored private let backupsDirectory: URL
+    @ObservationIgnored private let rasterCache: SVGRasterCache
     @ObservationIgnored private var simulatesFailure: Bool
 
     init(simulatesFailure: Bool = AppModel.launchRequestsSimulatedFailure,
          storeURL: URL = LibraryStore.defaultStoreURL,
          backupsDirectory: URL = LibraryStore.backupsDirectory,
+         rasterCache: SVGRasterCache = .shared,
          opener: @escaping @MainActor () throws -> ModelContainer = LibraryStore.open) {
         self.simulatesFailure = simulatesFailure
         self.storeURL = storeURL
         self.backupsDirectory = backupsDirectory
+        self.rasterCache = rasterCache
         self.opener = opener
         tryOpen()
     }
@@ -95,6 +98,8 @@ final class AppModel {
             resetFailure = "The library couldn't be moved to a backup, so nothing was changed. \(error.localizedDescription)"
             return
         }
+        // Images in the new library are rendered afresh when they're next shown.
+        rasterCache.removeAll()
         resetFailure = nil
         simulatesFailure = false
         tryOpen()

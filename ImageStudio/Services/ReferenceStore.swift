@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 ///
 /// Each attachment gets its own file. A file is owned by the composer until it's sent, then by
 /// the job and the images generated from it; `Studio` deletes it once nothing refers to it.
+/// Markup files (see `MarkupStore`) live here too and are accounted for in the same way.
 nonisolated enum ReferenceStore {
     /// The API accepts up to 16 input images.
     static let maxReferences = 16
@@ -15,11 +16,13 @@ nonisolated enum ReferenceStore {
     enum ImportError: LocalizedError {
         case unreadable
         case missing
+        case vector
 
         var errorDescription: String? {
             switch self {
             case .unreadable: "That file couldn't be read as an image."
             case .missing: "A reference image for this generation is missing from this device."
+            case .vector: "SVG images can't be used as references."
             }
         }
     }
@@ -51,7 +54,8 @@ nonisolated enum ReferenceStore {
     /// Imports an image file from disk, e.g. a library image used as a reference.
     @concurrent
     static func importFile(at source: URL) async throws -> String {
-        try await importImage(Data(contentsOf: source))
+        guard !SVGDocument.isSVG(source) else { throw ImportError.vector }
+        return try await importImage(Data(contentsOf: source))
     }
 
     /// Copies an existing reference so a new owner (e.g. the composer) has its own file.
@@ -66,9 +70,11 @@ nonisolated enum ReferenceStore {
     }
 
     /// Deletes files in the directory that aren't in `referenced`.
-    static func removeOrphans(keeping referenced: Set<String>) {
+    static func removeOrphans(keeping referenced: Set<String>, in directory: URL = directory) {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false))) ?? []
-        delete(orphans(in: files, referenced: referenced))
+        for name in orphans(in: files, referenced: referenced) {
+            try? FileManager.default.removeItem(at: directory.appending(path: name, directoryHint: .notDirectory))
+        }
     }
 
     static func orphans(in files: [String], referenced: Set<String>) -> [String] {
@@ -81,6 +87,9 @@ nonisolated enum ReferenceStore {
 
     /// Downscales to `maxPixelSize` (applying EXIF orientation) and encodes for upload.
     static func normalize(_ data: Data) throws -> (Data, UTType) {
+        // /images/edits takes raster images only. Checked first, so this holds even on a system
+        // where ImageIO can read SVG.
+        guard !SVGDocument.looksLikeSVG(data) else { throw ImportError.vector }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0 else { throw ImportError.unreadable }
         let options = [

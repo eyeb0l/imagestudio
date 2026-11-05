@@ -1,20 +1,23 @@
 import SwiftUI
 import UIKit
 
-/// A small rounded square showing a reference image from `ReferenceStore`.
+/// A small rounded square showing a reference image from `ReferenceStore`, with its markup if given.
 struct ReferenceThumbnail: View {
     let fileName: String
     var size: CGFloat = 56
+    var markupFileName: String?
 
     @State private var image: UIImage?
+    @State private var markupImage: UIImage?
     @State private var loadFailed = false
 
     private var url: URL { ReferenceStore.url(for: fileName) }
     private static let pixelSize = 300
 
-    init(fileName: String, size: CGFloat = 56) {
+    init(fileName: String, size: CGFloat = 56, markupFileName: String? = nil) {
         self.fileName = fileName
         self.size = size
+        self.markupFileName = markupFileName
         _image = State(initialValue: ImageLoader.shared.cachedImage(at: ReferenceStore.url(for: fileName),
                                                                      maxPixelSize: Self.pixelSize))
     }
@@ -24,9 +27,22 @@ struct ReferenceThumbnail: View {
             .frame(width: size, height: size)
             .overlay {
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
+                    if markupFileName == nil {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        // Whole rather than filling the square, so no strokes are cropped away.
+                        Rectangle().fill(.fill.tertiary)
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                        if let markupImage {
+                            Image(uiImage: markupImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                        }
+                    }
                 } else {
                     Rectangle().fill(.fill.tertiary)
                     if loadFailed {
@@ -44,6 +60,11 @@ struct ReferenceThumbnail: View {
                     loadFailed = true
                 }
             }
-            .accessibilityLabel(loadFailed ? "Reference image unavailable" : "Reference image")
+            .task(id: markupFileName) {
+                guard let markupFileName else { return }
+                markupImage = await ImageLoader.shared.image(at: ReferenceStore.url(for: markupFileName), maxPixelSize: Self.pixelSize)
+            }
+            .accessibilityLabel(loadFailed ? "Reference image unavailable"
+                                : markupFileName != nil ? "Reference image with markup" : "Reference image")
     }
 }
