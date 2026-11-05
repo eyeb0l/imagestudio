@@ -51,7 +51,9 @@ struct ComposerBar: View {
             }
         }
         .padding(10)
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
+        // Not interactive: that glass takes touches on its area even through an open menu, so a
+        // row of a chip's menu lying over the prompt box wouldn't select.
+        .glassEffect(.regular, in: .rect(cornerRadius: 26))
         .padding(.horizontal, 12)
         .padding(.bottom, 4)
         .sheet(isPresented: $showingOptions) { ComposerOptionsSheet() }
@@ -107,7 +109,7 @@ struct ComposerBar: View {
         .accessibilityLabel("Model, \(settings.model.displayName)")
 
         Menu {
-            // First, as this menu scrolls and a button at the end of it doesn't respond.
+            // First, as this menu scrolls.
             Button("Custom Size…", systemImage: "square.dashed") { showingCustomSize = true }
             Picker("Size", selection: binding(\.size)) {
                 ForEach(sizeOptions(for: settings)) { size in
