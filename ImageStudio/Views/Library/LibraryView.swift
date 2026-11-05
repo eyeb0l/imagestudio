@@ -25,6 +25,8 @@ struct LibraryView: View {
     private let columns = [GridItem(.adaptive(minimum: 100, maximum: 200), spacing: 2)]
 
     var body: some View {
+        @Bindable var composer = composer
+
         NavigationStack(path: $path) {
             Group {
                 if images.isEmpty && studio.jobs.isEmpty {
@@ -49,6 +51,9 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $showingSettings) { SettingsView() }
+        .fullScreenCover(item: $composer.markupRequest, onDismiss: {
+            if composer.hasMarkup { composerFocused = true }
+        }, content: { MarkupEditorView(request: $0) })
         .confirmationDialog(deletionTitle, isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
             Button(pendingDeletion.count == 1 ? "Delete Image" : "Delete \(pendingDeletion.count) Images", role: .destructive) {
                 studio.delete(pendingDeletion)
@@ -61,7 +66,7 @@ struct LibraryView: View {
             Button("Edit Prompt") {
                 composer.prompt = job.prompt
                 composer.setSettings(job.settings, defaults: preferences.defaults)
-                composer.replaceReferences(withCopiesOf: job.references)
+                composer.replaceReferences(withCopiesOf: job.references, markup: job.markupFileName)
                 studio.cancel(job)
                 composerFocused = true
             }
@@ -78,6 +83,20 @@ struct LibraryView: View {
             guard let message else { return }
             toast = Toast(message: message)
             composer.importFailure = nil
+        }
+        .onChange(of: composer.hasReferences) { _, hasReferences in
+            let format = composer.draftSettings(defaults: preferences.defaults).outputFormat
+            guard hasReferences, format.isGenerationOnly else { return }
+            toast = .referencesReplaced(format)
+        }
+        .onChange(of: composer.hasMarkup) { _, hasMarkup in
+            guard hasMarkup, !composer.draftSettings(defaults: preferences.defaults).model.supportsMarkup else { return }
+            toast = .markupNeedsModel
+        }
+        .onChange(of: composer.markupNotice) { _, message in
+            guard let message else { return }
+            toast = Toast(message: message, systemImage: "pencil.tip")
+            composer.markupNotice = nil
         }
         .onChange(of: notifier.openedImageID, initial: true) { _, id in
             guard let id else { return }
@@ -96,12 +115,12 @@ struct LibraryView: View {
                 ForEach(images) { image in
                     tile(for: image)
                 }
-                ForEach(studio.jobs) { job in
-                    ForEach(0..<job.settings.count, id: \.self) { _ in
-                        PendingTile(job: job)
-                            .onTapGesture { if job.isFailed { inspectedJob = job } }
-                            .contextMenu { pendingMenu(for: job) }
-                    }
+                // One flat list, as a lazy grid doesn't refresh tiles in a range nested inside another
+                // ForEach: they went on showing the state and even the job they first appeared with.
+                ForEach(pendingTiles) { tile in
+                    PendingTile(job: tile.job)
+                        .onTapGesture { if tile.job.isFailed { inspectedJob = tile.job } }
+                        .contextMenu { pendingMenu(for: tile.job) }
                 }
             }
         }
@@ -122,6 +141,8 @@ struct LibraryView: View {
                         onRegenerate: { regenerate([image]) },
                         onReusePrompt: { reuse(image) },
                         onUseAsReference: { useAsReferences([image]) },
+                        onMarkUp: { Task { await composer.beginMarkup(from: image) } },
+                        hasReferenceSlot: composer.remainingReferenceSlots > 0,
                         onSelect: { beginSelection(with: image) },
                         onDelete: { confirmDeletion(of: [image]) },
                         onNotice: { toast = $0 }
@@ -130,6 +151,7 @@ struct LibraryView: View {
             } preview: {
                 StoredImageView(fileName: image.fileName, maxPixelSize: 1200)
                     .aspectRatio(image.aspectRatio, contentMode: .fit)
+                    .transparencyBackdrop(for: image)
                     .frame(width: 340)
                     .frame(maxHeight: 520)
             }
@@ -172,7 +194,7 @@ struct LibraryView: View {
                     useAsReferences(selectedImages.filter(\.fileIsAvailable))
                     endSelection()
                 }
-                .disabled(selection.isEmpty)
+                .disabled(!selectedImages.contains(where: \.format.canBeReference))
                 Button("Regenerate", systemImage: "arrow.clockwise") {
                     regenerate(selectedImages)
                     endSelection()
@@ -205,8 +227,10 @@ struct LibraryView: View {
         let prompt = composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         guard composer.importingCount == 0 else { return }
-        studio.generate(prompt: prompt, settings: composer.settings(defaults: preferences.defaults),
-                        references: composer.takeReferences())
+        // Before the attachments are taken, as they decide what the settings can be.
+        let settings = composer.settings(defaults: preferences.defaults)
+        let attachments = composer.takeReferences()
+        studio.generate(prompt: prompt, settings: settings, references: attachments.references, markup: attachments.markup)
         composer.prompt = ""
         composerFocused = false
         Task { withAnimation(.snappy) { scrollPosition.scrollTo(edge: .bottom) } }
@@ -237,10 +261,13 @@ struct LibraryView: View {
         Task { withAnimation(.snappy) { scrollPosition.scrollTo(edge: .bottom) } }
     }
 
-    private func useAsReferences(_ images: [GeneratedImage]) {
+    private func useAsReferences(_ chosen: [GeneratedImage]) {
+        let images = chosen.filter(\.format.canBeReference)
         guard !images.isEmpty else { return }
         if images.count > composer.remainingReferenceSlots {
             toast = Toast(message: "Up to \(ReferenceStore.maxReferences) reference images", systemImage: "photo.stack")
+        } else if images.count < chosen.count {
+            toast = .someCantBeReferences
         }
         Task { await composer.addReferences(from: images) }
         composerFocused = true
@@ -273,6 +300,13 @@ struct LibraryView: View {
 
     // MARK: Derived state
 
+    /// One placeholder for each image the jobs will make.
+    private var pendingTiles: [PendingTileItem] {
+        studio.jobs.flatMap { job in
+            (0..<job.settings.count).map { PendingTileItem(job: job, index: $0) }
+        }
+    }
+
     private var title: String {
         guard isSelecting else { return "Image Studio" }
         return selection.isEmpty ? "Select Items" : "\(selection.count) Selected"
@@ -299,6 +333,12 @@ struct LibraryView: View {
     private var inspectingJob: Binding<Bool> {
         Binding(get: { inspectedJob != nil }, set: { if !$0 { inspectedJob = nil } })
     }
+}
+
+private struct PendingTileItem: Identifiable {
+    let job: Studio.Job
+    let index: Int
+    var id: String { "\(job.id.uuidString)-\(index)" }
 }
 
 // MARK: - Empty state

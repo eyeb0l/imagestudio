@@ -17,7 +17,7 @@ struct ComposerBar: View {
         let settings = composer.settings(defaults: preferences.defaults)
         let defaults = preferences.defaults.normalized()
 
-        let hasReferences = !composer.references.isEmpty || composer.importingCount > 0
+        let hasReferences = composer.hasReferences
 
         VStack(alignment: .leading, spacing: 10) {
             if hasReferences {
@@ -25,7 +25,8 @@ struct ComposerBar: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            TextField(hasReferences ? "Describe what to make with these images…" : "Describe an image…",
+            TextField(composer.hasMarkup ? "Describe the change you've marked…"
+                      : hasReferences ? "Describe what to make with these images…" : "Describe an image…",
                       text: $composer.prompt, axis: .vertical)
                 .lineLimit(1...6)
                 .focused(isFocused)
@@ -83,9 +84,18 @@ struct ComposerBar: View {
 
     @ViewBuilder
     private func chips(settings: GenerationSettings, defaults: GenerationSettings) -> some View {
+        if composer.hasMarkup {
+            // Says why the model may have changed, and that this draft isn't an ordinary one.
+            Button { composer.beginMarkup() } label: {
+                OptionChip(title: "Markup", systemImage: "pencil.tip", isModified: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit Markup")
+        }
+
         Menu {
             Picker("Model", selection: binding(\.model)) {
-                ForEach(ImageModel.allCases) { model in
+                ForEach(ImageModel.available(hasMarkup: composer.hasMarkup)) { model in
                     Text(model.displayName).tag(model)
                 }
             }
@@ -121,23 +131,33 @@ struct ComposerBar: View {
         }
         .accessibilityLabel("Quality, \(settings.quality.displayName)")
 
+        let countLimit = settings.outputFormat.allowsMultipleImages ? nil
+            : "\(settings.outputFormat.displayName) makes one image per request"
         Menu {
+            if let countLimit {
+                Text(countLimit)
+            }
             Picker("Images", selection: binding(\.count)) {
-                ForEach(GenerationSettings.countRange, id: \.self) { count in
+                ForEach(settings.allowedCountRange, id: \.self) { count in
                     Text(count == 1 ? "1 Image" : "\(count) Images").tag(count)
                 }
             }
         } label: {
             OptionChip(title: "\(settings.count)", systemImage: "square.stack",
                        isModified: settings.count != defaults.count)
+                .opacity(countLimit == nil ? 1 : 0.5)
         }
         .accessibilityLabel(settings.count == 1 ? "1 image" : "\(settings.count) images")
+        .accessibilityValue(countLimit ?? "")
 
         Button { showingOptions = true } label: {
-            OptionChip(systemImage: "slider.horizontal.3", isModified: outputDiffers(settings, defaults))
+            // Generation-only formats are named here, as they change what the prompt box can do.
+            OptionChip(title: settings.outputFormat.isGenerationOnly ? settings.outputFormat.displayName : nil,
+                       systemImage: "slider.horizontal.3", isModified: sheetOptionsDiffer(settings, defaults))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("More Options")
+        .accessibilityValue(settings.outputFormat.displayName)
 
         if composer.overrides != nil {
             Button {
@@ -175,7 +195,7 @@ struct ComposerBar: View {
             set: { newValue in
                 var settings = composer.settings(defaults: preferences.defaults)
                 settings[keyPath: keyPath] = newValue
-                withAnimation(.snappy) { composer.setSettings(settings, defaults: preferences.defaults) }
+                withAnimation(.snappy) { composer.applyEdit(settings, defaults: preferences.defaults) }
             }
         )
     }
@@ -185,10 +205,13 @@ struct ComposerBar: View {
         return presets.contains(settings.size) ? presets : presets + [settings.size]
     }
 
-    private func outputDiffers(_ a: GenerationSettings, _ b: GenerationSettings) -> Bool {
-        a.background != b.background || a.outputFormat != b.outputFormat
+    /// Whether any option that only appears in the options sheet differs from the defaults.
+    private func sheetOptionsDiffer(_ a: GenerationSettings, _ b: GenerationSettings) -> Bool {
+        a.complexity != b.complexity
+            || a.background != b.background || a.outputFormat != b.outputFormat
             || a.moderation != b.moderation
             || (a.outputFormat.supportsCompression && a.compression != b.compression)
+            || a.frameCount != b.frameCount || a.frameDurationMs != b.frameDurationMs
     }
 }
 
@@ -225,10 +248,11 @@ struct ComposerOptionsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                GenerationOptionsForm(settings: settings, header: "Next Generation")
+                GenerationOptionsForm(settings: settings, header: "Next Generation", hasReferences: composer.hasReferences,
+                                      hasMarkup: composer.hasMarkup)
                 Section {
                     Button("Save as Defaults") {
-                        preferences.defaults = composer.settings(defaults: preferences.defaults)
+                        preferences.defaults = composer.draftSettings(defaults: preferences.defaults)
                         composer.overrides = nil
                     }
                     .disabled(composer.overrides == nil)
@@ -252,12 +276,13 @@ struct ComposerOptionsSheet: View {
     private var settings: Binding<GenerationSettings> {
         Binding(
             get: { composer.settings(defaults: preferences.defaults) },
-            set: { composer.setSettings($0, defaults: preferences.defaults) }
+            set: { composer.applyEdit($0, defaults: preferences.defaults) }
         )
     }
 }
 
-/// Attached reference images, shown above the prompt with a remove button on each.
+/// Attached reference images, shown above the prompt with a remove button on each. The first one,
+/// which is the one markup applies to, also has a way to mark it up.
 private struct ReferenceStrip: View {
     @Environment(Composer.self) private var composer
 
@@ -265,7 +290,13 @@ private struct ReferenceStrip: View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(composer.references, id: \.self) { name in
-                    ReferenceThumbnail(fileName: name)
+                    ReferenceThumbnail(fileName: name, markupFileName: composer.markup?.referenceFileName == name
+                                       ? composer.markup?.overlayFileName : nil)
+                        .overlay(alignment: .bottomLeading) {
+                            if name == composer.references.first {
+                                markupControl
+                            }
+                        }
                         .overlay(alignment: .topTrailing) {
                             Button {
                                 withAnimation(.snappy) { composer.removeReference(name) }
@@ -294,5 +325,36 @@ private struct ReferenceStrip: View {
         }
         .scrollIndicators(.hidden)
         .scrollClipDisabled()
+    }
+
+    @ViewBuilder
+    private var markupControl: some View {
+        if composer.hasMarkup {
+            Menu {
+                Button("Edit Markup", systemImage: "pencil.tip") { composer.beginMarkup() }
+                Button("Remove Markup", systemImage: "trash", role: .destructive) {
+                    withAnimation(.snappy) { composer.removeMarkup() }
+                }
+            } label: {
+                markupBadge(isMarked: true)
+            }
+            .accessibilityLabel("Markup Options")
+        } else {
+            Button { composer.beginMarkup() } label: {
+                markupBadge(isMarked: false)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Mark Up Reference")
+        }
+    }
+
+    private func markupBadge(isMarked: Bool) -> some View {
+        Image(systemName: "pencil.tip")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 20, height: 20)
+            .background(isMarked ? AnyShapeStyle(.tint) : AnyShapeStyle(.black.opacity(0.55)), in: .circle)
+            .padding(4)
+            .contentShape(.rect)
     }
 }

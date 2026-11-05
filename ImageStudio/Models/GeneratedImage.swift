@@ -14,10 +14,16 @@ final class GeneratedImage {
     var modelID: String
     var requestedSize: String
     var quality: String
+    /// `nil` for images from models without complexity control, and for existing libraries.
+    var complexity: String?
     var background: String
     var outputFormat: String
     var outputCompression: Int?
     var moderation: String
+    /// `nil` for formats without frames, and for existing libraries.
+    var frameCount: Int?
+    /// `nil` for formats without frames, and for existing libraries.
+    var frameDurationMs: Int?
 
     // What the API actually produced.
     var width: Int
@@ -36,6 +42,9 @@ final class GeneratedImage {
     /// Reference images (in `ReferenceStore`) this image was generated from. Empty for plain
     /// text-to-image generations; the default lets existing libraries migrate.
     var referenceFileNames: [String] = []
+    /// The annotation layer (see `MarkupStore`) drawn on the first reference. `nil` for images
+    /// made without markup, and for existing libraries.
+    var markupFileName: String?
 
     init(
         id: UUID = UUID(),
@@ -53,7 +62,8 @@ final class GeneratedImage {
         duration: TimeInterval,
         inputTokens: Int? = nil,
         outputTokens: Int? = nil,
-        referenceFileNames: [String] = []
+        referenceFileNames: [String] = [],
+        markupFileName: String? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -62,10 +72,13 @@ final class GeneratedImage {
         self.modelID = settings.model.rawValue
         self.requestedSize = settings.size.apiValue
         self.quality = settings.quality.rawValue
+        self.complexity = settings.apiComplexity
         self.background = settings.background.rawValue
         self.outputFormat = settings.outputFormat.rawValue
         self.outputCompression = settings.outputFormat.supportsCompression ? settings.compression : nil
         self.moderation = settings.moderation.rawValue
+        self.frameCount = settings.apiFrameCount
+        self.frameDurationMs = settings.apiFrameDurationMs
         self.width = width
         self.height = height
         self.resolvedQuality = resolvedQuality
@@ -77,6 +90,7 @@ final class GeneratedImage {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.referenceFileNames = referenceFileNames
+        self.markupFileName = markupFileName
     }
 }
 
@@ -104,11 +118,19 @@ extension GeneratedImage {
         settings.model = ImageModel(rawValue: modelID) ?? settings.model
         settings.size = ImageSize(apiValue: requestedSize) ?? .auto
         settings.quality = ImageQuality(rawValue: quality) ?? .auto
+        settings.complexity = complexity.flatMap(ImageComplexity.init(rawValue:)) ?? settings.complexity
         settings.background = ImageBackground(rawValue: background) ?? .auto
         settings.outputFormat = format
         settings.compression = outputCompression ?? settings.compression
         settings.moderation = ModerationLevel(rawValue: moderation) ?? .auto
+        settings.frameCount = frameCount ?? settings.frameCount
+        settings.frameDurationMs = frameDurationMs ?? settings.frameDurationMs
         settings.count = 1
-        return settings.normalized()
+        return settings.normalized(hasReferences: !referenceFileNames.isEmpty, hasMarkup: markupFileName != nil)
+    }
+
+    /// Every file in `ReferenceStore` this image relies on.
+    var referenceStoreFileNames: [String] {
+        referenceFileNames + MarkupStore.fileNames(forOverlay: markupFileName)
     }
 }

@@ -31,11 +31,15 @@ final class Studio {
         var attempt: Int
         /// Reference images (in `ReferenceStore`) sent with the request.
         let references: [String]
+        /// The annotation layer (see `MarkupStore`) for the first reference, if any.
+        let markupFileName: String?
 
         init(id: UUID = UUID(), prompt: String, settings: GenerationSettings,
-             startedAt: Date = .now, state: State = .running, attempt: Int = 1, references: [String] = []) {
+             startedAt: Date = .now, state: State = .running, attempt: Int = 1, references: [String] = [],
+             markupFileName: String? = nil) {
             self.id = id
             self.references = references
+            self.markupFileName = markupFileName
             self.prompt = prompt
             self.settings = settings
             self.startedAt = startedAt
@@ -45,6 +49,11 @@ final class Studio {
 
         var isFailed: Bool {
             if case .failed = state { true } else { false }
+        }
+
+        /// Every file in `ReferenceStore` this job relies on.
+        var referenceStoreFileNames: [String] {
+            references + MarkupStore.fileNames(forOverlay: markupFileName)
         }
     }
 
@@ -68,6 +77,8 @@ final class Studio {
     /// Downloaded results whose save failed, kept so Retry can save them again without paying for
     /// a new request. In memory only: they last until the job is removed or the app quits.
     @ObservationIgnored private var heldOutputs: [Job.ID: (ticket: GenerationTicket, output: OpenAIImageClient.Output)] = [:]
+    /// Removes files in `ReferenceStore` other than the ones given.
+    @ObservationIgnored private let removeOrphanedReferences: (Set<String>) -> Void
 
     private static let log = Logger(subsystem: "com.eyeb0l.ImageStudio", category: "Studio")
 
@@ -75,10 +86,12 @@ final class Studio {
 
     static let interruptedMessage = "Image Studio was closed before this image finished. Retry to generate it again."
 
-    init(container: ModelContainer, apiKeys: APIKeyStore, session: GenerationSession = .shared) {
+    init(container: ModelContainer, apiKeys: APIKeyStore, session: GenerationSession = .shared,
+         removeOrphanedReferences: @escaping (Set<String>) -> Void = { ReferenceStore.removeOrphans(keeping: $0) }) {
         self.container = container
         self.apiKeys = apiKeys
         self.session = session
+        self.removeOrphanedReferences = removeOrphanedReferences
 
         let records: [PendingGeneration]
         do {
@@ -92,12 +105,12 @@ final class Studio {
         jobs = records.map { record in
             Job(id: record.id, prompt: record.prompt, settings: record.settings, startedAt: record.startedAt,
                 state: record.failureMessage.map { .failed($0) } ?? .running, attempt: record.attempt,
-                references: record.referenceFileNames)
+                references: record.referenceFileNames, markupFileName: record.markupFileName)
         }
 
         // Nothing else holds references at launch (the composer starts empty), so any file not
         // used by an image or a job is left over, e.g. from an attachment that was never sent.
-        ReferenceStore.removeOrphans(keeping: referencedFileNames())
+        removeOrphanedReferences(referencedFileNames())
 
         session.setResultHandler { [weak self] ticket, outcome, retryAfter in
             await self?.handle(ticket, outcome, retryAfter: retryAfter)
@@ -112,14 +125,18 @@ final class Studio {
     // MARK: Generation
 
     /// Starts a generation. With `references` (file names in `ReferenceStore`), the request uses
-    /// them as reference images; the job takes ownership of those files.
-    func generate(prompt: String, settings: GenerationSettings, references: [String] = []) {
+    /// them as reference images, with `markup` (see `MarkupStore`) as an annotation layer for the
+    /// first one; the job takes ownership of those files.
+    func generate(prompt: String, settings: GenerationSettings, references: [String] = [], markup: String? = nil) {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
-        let job = Job(prompt: prompt, settings: settings.normalized(), references: references)
+        let job = Job(prompt: prompt,
+                      settings: settings.normalized(hasReferences: !references.isEmpty, hasMarkup: markup != nil),
+                      references: references, markupFileName: markup)
         withAnimation(.snappy) { jobs.append(job) }
         context.insert(PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings,
-                                         startedAt: job.startedAt, referenceFileNames: job.references))
+                                         startedAt: job.startedAt, referenceFileNames: job.references,
+                                         markupFileName: job.markupFileName))
         // If this fails the request still runs and its images are still saved; only the
         // placeholder tile wouldn't survive a relaunch. The record is retried on the next save.
         saveContext("record pending generation")
@@ -130,7 +147,8 @@ final class Studio {
     /// Generates one new image per source image, using the same prompt and settings.
     func regenerate(_ images: [GeneratedImage]) {
         for image in images {
-            generate(prompt: image.prompt, settings: image.settings, references: image.referenceFileNames)
+            generate(prompt: image.prompt, settings: image.settings, references: image.referenceFileNames,
+                     markup: image.markupFileName)
         }
     }
 
@@ -158,7 +176,7 @@ final class Studio {
     private func start(_ job: Job) {
         let ticket = GenerationTicket(jobID: job.id, prompt: job.prompt, settings: job.settings,
                                       startedAt: job.startedAt, attempt: job.attempt,
-                                      referenceFileNames: job.references)
+                                      referenceFileNames: job.references, markupFileName: job.markupFileName)
         if let problem = submit(ticket) {
             markFailed(job.id, message: problem)
         }
@@ -199,7 +217,7 @@ final class Studio {
     }
 
     private func handleFailure(_ error: any Error, for ticket: GenerationTicket, retryAfter: TimeInterval?) {
-        var message = Self.message(for: error)
+        var message = Self.message(for: error, settings: ticket.settings)
 
         if let delay = RetryPolicy.retryDelay(after: error, attempt: ticket.attempt, retryAfter: retryAfter) {
             // A new background task with an earliest start date, so it also runs if the app is
@@ -280,7 +298,8 @@ final class Studio {
 
         // 1. Write every file. A failure removes the ones already written.
         var written: [(fileName: String, data: Data)] = []
-        for data in output.images {
+        for image in output.images {
+            let data = ticket.settings.outputFormat.isVector ? SVGDocument.addingSize(reportedSize, to: image) : image
             let fileName = ImageStore.makeFileName(format: ticket.settings.outputFormat, date: now)
             do {
                 try await writeFile(data, fileName)
@@ -294,15 +313,15 @@ final class Studio {
         // 2. Insert all records and save once. On failure take them out again, and the files too.
         var inserted: [GeneratedImage] = []
         for (index, item) in written.enumerated() {
-            let pixels = ImageStore.pixelSize(of: item.data)
+            let dimensions = ImageStore.dimensions(of: item.data, format: ticket.settings.outputFormat, reported: reportedSize)
             let image = GeneratedImage(
                 // Offset by a millisecond so a batch keeps its order in the library.
                 createdAt: now.addingTimeInterval(Double(index) / 1000),
                 prompt: ticket.prompt,
                 revisedPrompt: output.revisedPrompts[safe: index] ?? nil,
                 settings: ticket.settings,
-                width: pixels?.width ?? reportedSize?.width ?? 0,
-                height: pixels?.height ?? reportedSize?.height ?? 0,
+                width: dimensions.width,
+                height: dimensions.height,
                 resolvedQuality: output.quality,
                 resolvedBackground: output.background,
                 fileName: item.fileName,
@@ -311,7 +330,8 @@ final class Studio {
                 duration: duration,
                 inputTokens: share(output.inputTokens),
                 outputTokens: share(output.outputTokens),
-                referenceFileNames: ticket.referenceFileNames
+                referenceFileNames: ticket.referenceFileNames,
+                markupFileName: ticket.markupFileName
             )
             context.insert(image)
             inserted.append(image)
@@ -326,10 +346,13 @@ final class Studio {
         return inserted
     }
 
-    private static func message(for error: any Error) -> String {
+    static func message(for error: any Error, settings: GenerationSettings) -> String {
         if let urlError = error as? URLError, urlError.code == .cancelled {
             // A cancellation we didn't ask for: the system stopped it, e.g. after a force-quit.
             return interruptedMessage
+        }
+        if case .api(status: 403, _, _)? = error as? OpenAIError, settings.outputFormat.mayRequirePreviewAccess {
+            return "\(error.localizedDescription) \(settings.outputFormat.displayName) output may need preview access for this model."
         }
         return error.localizedDescription
     }
@@ -350,7 +373,7 @@ final class Studio {
     }
 
     private func removeJob(_ id: Job.ID) {
-        let references = jobs.first { $0.id == id }?.references ?? []
+        let references = jobs.first { $0.id == id }?.referenceStoreFileNames ?? []
         withAnimation(.snappy) { jobs.removeAll { $0.id == id } }
         defer { releaseReferences(references) }
         heldOutputs[id] = nil
@@ -373,7 +396,8 @@ final class Studio {
                 record = existing
             } else {
                 record = PendingGeneration(id: job.id, prompt: job.prompt, settings: job.settings,
-                                           startedAt: job.startedAt, referenceFileNames: job.references)
+                                           startedAt: job.startedAt, referenceFileNames: job.references,
+                                           markupFileName: job.markupFileName)
                 context.insert(record)
             }
         } catch {
@@ -404,20 +428,22 @@ final class Studio {
     // MARK: Library
 
     func delete(_ images: [GeneratedImage]) {
-        let references = images.flatMap(\.referenceFileNames)
+        let references = images.flatMap(\.referenceStoreFileNames)
         if let problem = Self.deleteImages(images, in: context) { alertMessage = problem }
         releaseReferences(references)
     }
 
-    func deleteAll() {
-        if let problem = Self.deleteEverything(in: context) { alertMessage = problem }
-        ReferenceStore.removeOrphans(keeping: referencedFileNames())
+    /// `keeping` is for files in `ReferenceStore` that something other than the library still
+    /// needs: the composer's attachments.
+    func deleteAll(keeping held: [String] = [], removeAllImageFiles: () throws -> Void = { try ImageStore.deleteAll() }) {
+        if let problem = Self.deleteEverything(in: context, removeAllFiles: removeAllImageFiles) { alertMessage = problem }
+        removeOrphanedReferences(referencedFileNames().union(held))
     }
 
     // MARK: References
 
-    /// Deletes reference files that no image or job uses any more. Files still held by the
-    /// composer are never passed here: the composer owns separate copies until it sends them.
+    /// Deletes reference and markup files that no image or job uses any more. Files still held by
+    /// the composer are never passed here: the composer owns separate copies until it sends them.
     private func releaseReferences(_ names: [String]) {
         guard !names.isEmpty else { return }
         let inUse = referencedFileNames()
@@ -425,10 +451,10 @@ final class Studio {
     }
 
     private func referencedFileNames() -> Set<String> {
-        var names = Set(jobs.flatMap(\.references))
+        var names = Set(jobs.flatMap(\.referenceStoreFileNames))
         do {
             for image in try context.fetch(FetchDescriptor<GeneratedImage>()) {
-                names.formUnion(image.referenceFileNames)
+                names.formUnion(image.referenceStoreFileNames)
             }
         } catch {
             // If the library can't be read, treat every file as in use rather than risk deleting one.

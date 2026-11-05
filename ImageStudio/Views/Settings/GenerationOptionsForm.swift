@@ -4,11 +4,15 @@ import SwiftUI
 struct GenerationOptionsForm: View {
     @Binding var settings: GenerationSettings
     var header: String = "Generation"
+    /// Whether the settings are for a request with reference images, which limits the formats.
+    var hasReferences = false
+    /// Whether the settings are for a request with markup, which limits the models.
+    var hasMarkup = false
 
     var body: some View {
-        Section(header) {
+        Section {
             NavigationLink {
-                ModelPickerView(selection: modelBinding)
+                ModelPickerView(selection: modelBinding, models: ImageModel.available(hasMarkup: hasMarkup))
             } label: {
                 LabeledContent("Model", value: settings.model.displayName)
             }
@@ -25,8 +29,29 @@ struct GenerationOptionsForm: View {
                 }
             }
 
-            Stepper(value: $settings.count, in: GenerationSettings.countRange) {
+            if settings.model.supportsComplexity {
+                Picker("Complexity", selection: $settings.complexity) {
+                    ForEach(ImageComplexity.allCases) { Text($0.displayName).tag($0) }
+                }
+            }
+
+            Stepper(value: $settings.count, in: settings.allowedCountRange) {
                 LabeledContent("Images", value: settings.count.formatted())
+            }
+            .disabled(!settings.outputFormat.allowsMultipleImages)
+        } header: {
+            Text(header)
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                if hasMarkup {
+                    Text("Markup works with GPT Image 2.5 and 2.6.")
+                }
+                if settings.outputFormat == .svg {
+                    Text("SVG makes one image per request. Quality and complexity apply to the reference image OpenAI creates first, then a second model writes the SVG.")
+                }
+                if settings.model.supportsComplexity {
+                    Text("Complexity sets how much the model plans before rendering. Higher helps with dense text and complex layouts, but can take longer and introduce unwanted changes.")
+                }
             }
         }
 
@@ -36,7 +61,7 @@ struct GenerationOptionsForm: View {
             }
 
             Picker("Format", selection: formatBinding) {
-                ForEach(OutputFormat.allCases) { Text($0.displayName).tag($0) }
+                ForEach(settings.model.formats(hasReferences: hasReferences)) { Text($0.displayName).tag($0) }
             }
 
             if settings.outputFormat.supportsCompression {
@@ -52,8 +77,41 @@ struct GenerationOptionsForm: View {
         } header: {
             Text("Output")
         } footer: {
-            Text("Transparent backgrounds need PNG or WebP. Low moderation applies less restrictive content filtering.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Transparent backgrounds need PNG or WebP. Low moderation applies less restrictive content filtering.")
+                if let unavailableFormatsNote {
+                    Text(unavailableFormatsNote)
+                }
+            }
         }
+
+        if settings.outputFormat.isAnimated {
+            Section {
+                Stepper(value: $settings.frameCount, in: GenerationSettings.frameCountRange) {
+                    LabeledContent("Frames", value: settings.frameCount.formatted())
+                }
+                Stepper(value: $settings.frameDurationMs, in: GenerationSettings.frameDurationRange,
+                        step: GenerationSettings.frameDurationStep) {
+                    LabeledContent("Frame Duration", value: "\(settings.frameDurationMs.formatted()) ms")
+                }
+            } header: {
+                Text("Animation")
+            } footer: {
+                Text("Each loop lasts \(loopSeconds) s. If a request is too large, reduce the frames, size or number of images.")
+            }
+        }
+    }
+
+    /// Says which of the model's formats reference images rule out, if any.
+    private var unavailableFormatsNote: String? {
+        guard hasReferences else { return nil }
+        let unavailable = settings.model.supportedFormats.filter { !settings.model.formats(hasReferences: true).contains($0) }
+        guard !unavailable.isEmpty else { return nil }
+        return "\(unavailable.map(\.displayName).formatted(.list(type: .or))) can't be used with reference images."
+    }
+
+    private var loopSeconds: String {
+        (Double(settings.frameCount * settings.frameDurationMs) / 1000).formatted(.number.precision(.fractionLength(0...2)))
     }
 
     // Bindings that keep combinations valid.
@@ -62,25 +120,26 @@ struct GenerationOptionsForm: View {
         Binding(get: { settings.model }, set: { model in
             var updated = settings
             updated.model = model
-            settings = updated.normalized()
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
     private var backgroundBinding: Binding<ImageBackground> {
         Binding(get: { settings.background }, set: { background in
-            settings.background = background
-            if background == .transparent, !settings.outputFormat.supportsTransparency {
-                settings.outputFormat = .png
-            }
+            var updated = settings
+            updated.background = background
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
     private var formatBinding: Binding<OutputFormat> {
         Binding(get: { settings.outputFormat }, set: { format in
-            settings.outputFormat = format
-            if !format.supportsTransparency, settings.background == .transparent {
-                settings.background = .auto
+            var updated = settings
+            updated.outputFormat = format
+            if !format.supportsTransparency, updated.background == .transparent {
+                updated.background = .auto
             }
+            settings = updated.normalized(hasReferences: hasReferences, hasMarkup: hasMarkup)
         })
     }
 
@@ -93,10 +152,11 @@ struct GenerationOptionsForm: View {
 
 struct ModelPickerView: View {
     @Binding var selection: ImageModel
+    var models = ImageModel.allCases
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        List(ImageModel.allCases) { model in
+        List(models) { model in
             Button {
                 selection = model
                 dismiss()

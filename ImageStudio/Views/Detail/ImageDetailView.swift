@@ -32,8 +32,11 @@ struct ImageDetailView: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(images) { image in
-                    ImageDetailPage(image: image) { fullscreen = FullscreenItem(url: $0) }
-                        .containerRelativeFrame(.horizontal)
+                    // Neighbouring pages are kept ready for swiping, but only the one in view animates.
+                    ImageDetailPage(image: image, isInView: image.id == (currentID ?? initialID) && fullscreen == nil) {
+                        fullscreen = $0
+                    }
+                    .containerRelativeFrame(.horizontal)
                 }
             }
             .scrollTargetLayout()
@@ -50,7 +53,7 @@ struct ImageDetailView: View {
                             titleVisibility: .visible) {
             Button("Delete Image", role: .destructive, action: deleteCurrent)
         }
-        .fullScreenCover(item: $fullscreen) { FullscreenImageViewer(url: $0.url) }
+        .fullScreenCover(item: $fullscreen) { FullscreenImageViewer(url: $0.url, overlayURL: $0.overlayURL) }
         .sheet(isPresented: $showingSettings) { SettingsView() }
         .onChange(of: images.isEmpty) { _, isEmpty in if isEmpty { dismiss() } }
     }
@@ -74,7 +77,15 @@ struct ImageDetailView: View {
                         Task { await composer.addReferences(from: [image]) }
                         dismiss()
                     }
-                    .disabled(!current.fileIsAvailable || composer.remainingReferenceSlots == 0)
+                    .disabled(!current.fileIsAvailable || composer.remainingReferenceSlots == 0
+                              || !current.format.canBeReference)
+                    Button("Mark Up", systemImage: "pencil.tip.crop.circle") {
+                        let image = current
+                        Task { await composer.beginMarkup(from: image) }
+                        dismiss()
+                    }
+                    .disabled(!current.fileIsAvailable || composer.remainingReferenceSlots == 0
+                              || !current.format.canBeReference)
                 }
             } label: {
                 Label("More", systemImage: "ellipsis")
@@ -127,19 +138,21 @@ struct ImageDetailView: View {
 
 private struct ImageDetailPage: View {
     let image: GeneratedImage
+    let isInView: Bool
     /// Opens a file (this image or one of its references) full screen.
-    var onOpenFullscreen: (URL) -> Void
+    var onOpenFullscreen: (FullscreenItem) -> Void
 
     var body: some View {
         let fileIsMissing = !image.fileIsAvailable
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                StoredImageView(fileName: image.fileName, maxPixelSize: 2048, contentMode: .fit)
+                StoredImageView(fileName: image.fileName, maxPixelSize: FullscreenImageViewer.detailPixelSize, contentMode: .fit,
+                                animates: image.format.isAnimated && isInView)
                     .aspectRatio(image.aspectRatio, contentMode: .fit)
-                    .background { if image.isTransparent { Checkerboard() } }
+                    .transparencyBackdrop(for: image)
                     .frame(maxWidth: .infinity, maxHeight: 460)
                     .contentShape(.rect)
-                    .onTapGesture { onOpenFullscreen(image.fileURL) }
+                    .onTapGesture { onOpenFullscreen(FullscreenItem(url: image.fileURL)) }
                     .accessibilityLabel("Image. Double tap to view full screen.")
                     .accessibilityAddTraits(.isButton)
 
@@ -161,9 +174,12 @@ private struct ImageDetailPage: View {
                             SectionLabel("References")
                             ScrollView(.horizontal) {
                                 HStack(spacing: 8) {
+                                    if let markup = image.markupFileName, let first = image.referenceFileNames.first {
+                                        MarkupTile(reference: first, markup: markup, onOpenFullscreen: onOpenFullscreen)
+                                    }
                                     ForEach(image.referenceFileNames, id: \.self) { name in
                                         Button {
-                                            onOpenFullscreen(ReferenceStore.url(for: name))
+                                            onOpenFullscreen(FullscreenItem(url: ReferenceStore.url(for: name)))
                                         } label: {
                                             ReferenceThumbnail(fileName: name, size: 72)
                                         }
@@ -184,6 +200,33 @@ private struct ImageDetailPage: View {
             .padding(.bottom, 32)
         }
         .scrollIndicators(.hidden)
+    }
+}
+
+/// The first reference with the markup drawn on it. Tap to see them together, full screen.
+private struct MarkupTile: View {
+    let reference: String
+    let markup: String
+    var onOpenFullscreen: (FullscreenItem) -> Void
+
+    var body: some View {
+        Button {
+            onOpenFullscreen(FullscreenItem(url: ReferenceStore.url(for: reference),
+                                            overlayURL: ReferenceStore.url(for: markup)))
+        } label: {
+            ReferenceThumbnail(fileName: reference, size: 72, markupFileName: markup)
+                .overlay(alignment: .bottomLeading) {
+                    Image(systemName: "pencil.tip")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 20, height: 20)
+                        .background(.tint, in: .circle)
+                        .padding(4)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!ReferenceStore.fileExists(reference) || !ReferenceStore.fileExists(markup))
+        .accessibilityLabel("Markup. Double tap to view it on the first reference.")
     }
 }
 
@@ -231,6 +274,13 @@ private struct DetailsGrid: View {
                 }
             }
             .font(.subheadline)
+            if image.format.isVector {
+                // The API reports authoring separately from image rendering, and may not report it.
+                Text("Quality and complexity apply to the reference image OpenAI creates first. Writing the SVG is billed separately, so the token counts may not cover the whole cost.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+            }
         }
     }
 
@@ -238,7 +288,21 @@ private struct DetailsGrid: View {
         var rows: [(String, String)] = [
             ("Model", image.modelDisplayName),
             ("Size", sizeLabel),
+        ]
+        if image.format.isVector, let requested = ImageSize(apiValue: image.requestedSize), !requested.isAuto {
+            rows.append(("Requested", requested.dimensionsLabel))
+        }
+        rows += [
             ("Quality", resolved(requested: image.quality, actual: image.resolvedQuality)),
+        ]
+        if let complexity = image.complexity {
+            rows.append(("Complexity", displayName(complexity)))
+        }
+        if let frameCount = image.frameCount, let duration = image.frameDurationMs, image.format.isAnimated {
+            rows.append(("Frames", frameCount.formatted()))
+            rows.append(("Frame Duration", "\(duration.formatted()) ms"))
+        }
+        rows += [
             ("Background", resolved(requested: image.background, actual: image.resolvedBackground)),
             ("Format", formatLabel),
             ("Moderation", image.moderation.capitalized),
@@ -253,6 +317,10 @@ private struct DetailsGrid: View {
     }
 
     private var sizeLabel: String {
+        // A vector has no resolution. Its recorded dimensions only give its shape.
+        if image.format.isVector {
+            return "Vector · \(ImageSize(width: image.width, height: image.height).aspectRatioLabel)"
+        }
         let actual = "\(image.width) × \(image.height)"
         return image.requestedSize == "auto" ? "\(actual) (Auto)" : actual
     }

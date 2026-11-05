@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(Preferences.self) private var preferences
     @Environment(Studio.self) private var studio
+    @Environment(Composer.self) private var composer
     @Environment(\.dismiss) private var dismiss
 
     @Query private var images: [GeneratedImage]
@@ -43,7 +44,7 @@ struct SettingsView: View {
                 isPresented: $showingDeleteAll,
                 titleVisibility: .visible
             ) {
-                Button("Delete All Images", role: .destructive) { studio.deleteAll() }
+                Button("Delete All Images", role: .destructive) { studio.deleteAll(keeping: composer.heldFileNames) }
             }
         }
     }

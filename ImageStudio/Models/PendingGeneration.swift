@@ -15,9 +15,12 @@ final class PendingGeneration {
     var attempt: Int = 1
     /// Reference images (in `ReferenceStore`) sent with the request.
     var referenceFileNames: [String] = []
+    /// The annotation layer (see `MarkupStore`) sent with the request, if any.
+    var markupFileName: String?
 
     init(id: UUID, prompt: String, settings: GenerationSettings, startedAt: Date,
-         failureMessage: String? = nil, attempt: Int = 1, referenceFileNames: [String] = []) {
+         failureMessage: String? = nil, attempt: Int = 1, referenceFileNames: [String] = [],
+         markupFileName: String? = nil) {
         self.id = id
         self.prompt = prompt
         self.settingsData = (try? JSONEncoder().encode(settings)) ?? Data()
@@ -25,6 +28,7 @@ final class PendingGeneration {
         self.failureMessage = failureMessage
         self.attempt = attempt
         self.referenceFileNames = referenceFileNames
+        self.markupFileName = markupFileName
     }
 }
 

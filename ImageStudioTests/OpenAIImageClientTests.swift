@@ -16,7 +16,7 @@ struct OpenAIImageClientTests {
 
     @Test func encodesRequestBody() throws {
         var settings = GenerationSettings()
-        settings.model = .sunburst
+        settings.model = .sunburst25
         settings.size = ImageSize(width: 1536, height: 864)
         settings.quality = .xhigh
         settings.count = 2
@@ -29,6 +29,27 @@ struct OpenAIImageClientTests {
         #expect(body["quality"] as? String == "xhigh")
         #expect(body["output_format"] as? String == "png")
         #expect(body["output_compression"] == nil) // PNG has no compression
+    }
+
+    @Test(arguments: [
+        (ImageModel.flare26, "gpt-image-2.6-flare"),
+        (ImageModel.sunburst26, "gpt-image-2.6-sunburst"),
+    ])
+    func sendsComplexityToModelsThatSupportIt(model: ImageModel, id: String) throws {
+        var settings = GenerationSettings()
+        settings.model = model
+        settings.complexity = .low
+        let body = try json(OpenAIImageClient.requestBody(prompt: "x", settings: settings))
+        #expect(body["model"] as? String == id)
+        #expect(body["complexity"] as? String == "low")
+    }
+
+    @Test func omitsComplexityForOtherModels() throws {
+        var settings = GenerationSettings()
+        settings.model = .flare25
+        settings.complexity = .low
+        let body = try json(OpenAIImageClient.requestBody(prompt: "x", settings: settings))
+        #expect(body["complexity"] == nil)
     }
 
     @Test func includesCompressionForLossyFormats() throws {

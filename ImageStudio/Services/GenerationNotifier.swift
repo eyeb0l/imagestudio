@@ -45,7 +45,9 @@ final class GenerationNotifier: NSObject, UNUserNotificationCenterDelegate {
     func announceSaved(jobID: UUID, prompt: String, images: [(id: UUID, fileName: String)]) async {
         guard let first = images.first else { return }
         let content = Self.savedContent(prompt: prompt, imageCount: images.count, firstImageID: first.id)
-        if let attachment = await Self.thumbnailAttachment(fileName: first.fileName) {
+        // Nothing's posted while the app is active, so a thumbnail would be wasted work.
+        if UIApplication.shared.applicationState != .active,
+           let attachment = await Self.thumbnailAttachment(fileName: first.fileName) {
             content.attachments = [attachment]
         }
         await post(content, id: jobID)
@@ -94,9 +96,13 @@ final class GenerationNotifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// A small copy of the image for the notification. Attachments are moved into the system's
-    /// store, so the original must never be attached directly.
-    private static func thumbnailAttachment(fileName: String) async -> UNNotificationAttachment? {
-        guard let image = await ImageLoader.shared.image(fileName: fileName, maxPixelSize: thumbnailSize),
+    /// store, so the original must never be attached directly. An SVG can't be rendered in the
+    /// background (see `SVGRasterizer`), so in a background relaunch its notification goes
+    /// without a thumbnail, unless the library grid has already cached one. Its caches are keyed
+    /// by exact size, so that's the size to ask for.
+    static func thumbnailAttachment(fileName: String, loader: ImageLoader = .shared) async -> UNNotificationAttachment? {
+        let size = SVGDocument.isSVG(ImageStore.url(for: fileName)) ? StoredImageView.thumbnailPixelSize : thumbnailSize
+        guard let image = await loader.image(fileName: fileName, maxPixelSize: size),
               let data = image.pngData() else { return nil }
         let url = URL.temporaryDirectory.appending(path: "notification-\(UUID().uuidString).png")
         do {

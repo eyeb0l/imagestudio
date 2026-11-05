@@ -62,9 +62,32 @@ struct GenerationSettingsTests {
 
     @Test func keepsExtendedQualityForNewModels() {
         var settings = GenerationSettings()
-        settings.model = .sunburst
+        settings.model = .sunburst25
         settings.quality = .xhigh
         #expect(settings.normalized().quality == .xhigh)
+    }
+
+    @Test func keepsComplexityForModelsThatSupportIt() {
+        var settings = GenerationSettings()
+        settings.model = .sunburst26
+        settings.complexity = .medium
+        #expect(settings.normalized().complexity == .medium)
+        #expect(settings.apiComplexity == "medium")
+    }
+
+    @Test func resetsComplexityForOtherModels() {
+        var settings = GenerationSettings()
+        settings.complexity = .low
+        settings.model = .flare25
+        #expect(settings.normalized().complexity == .high)
+        #expect(settings.apiComplexity == nil)
+    }
+
+    @Test func extendedQualityOnGPTImage26() {
+        for model in [ImageModel.flare26, .sunburst26] {
+            #expect(model.supportedQualities == ImageQuality.allCases)
+            #expect(model.supportsCustomSizes)
+        }
     }
 
     @Test func resetsCustomSizeForFixedSizeModels() {
@@ -96,18 +119,50 @@ struct GenerationSettingsTests {
     @Test func decodingIsLenient() throws {
         let json = #"{"model":"dall-e-3","size":"1536x1024","quality":"ultra","count":3}"#
         let settings = try JSONDecoder().decode(GenerationSettings.self, from: Data(json.utf8))
-        #expect(settings.model == .flare)      // unknown model falls back
+        #expect(settings.model == .flare26)    // unknown model falls back
         #expect(settings.size == .landscape)   // valid field kept
         #expect(settings.quality == .auto)     // unknown quality falls back
         #expect(settings.count == 3)
     }
 
+    @Test func decodesSettingsSavedBeforeGPTImage26() throws {
+        let json = #"{"model":"gpt-image-2.5-flare","quality":"max"}"#
+        let settings = try JSONDecoder().decode(GenerationSettings.self, from: Data(json.utf8))
+        #expect(settings.model == .flare25)
+        #expect(settings.quality == .max)
+        #expect(settings.complexity == .high)
+    }
+
+    @Test func unknownComplexityFallsBack() throws {
+        let json = #"{"model":"gpt-image-2.6-flare","complexity":"extreme"}"#
+        let settings = try JSONDecoder().decode(GenerationSettings.self, from: Data(json.utf8))
+        #expect(settings.model == .flare26)
+        #expect(settings.complexity == .high)
+    }
+
+    @Test func libraryImagesKeepComplexityForRegeneration() {
+        var settings = GenerationSettings()
+        settings.model = .sunburst26
+        settings.complexity = .low
+        let image = GeneratedImage(prompt: "p", settings: settings, width: 1, height: 1, fileName: "f.png",
+                                   fileSize: 1, batchID: UUID(), duration: 1)
+        #expect(image.complexity == "low")
+        #expect(image.settings.complexity == .low)
+
+        settings.model = .flare25
+        let older = GeneratedImage(prompt: "p", settings: settings, width: 1, height: 1, fileName: "f.png",
+                                   fileSize: 1, batchID: UUID(), duration: 1)
+        #expect(older.complexity == nil)
+        #expect(older.settings.complexity == .high)
+    }
+
     @Test func codableRoundTrip() throws {
         var settings = GenerationSettings()
-        settings.model = .gptImage2
+        settings.model = .sunburst26
         settings.size = ImageSize(width: 1536, height: 864)
         settings.outputFormat = .webp
         settings.compression = 70
+        settings.complexity = .medium
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(GenerationSettings.self, from: data) == settings)
     }

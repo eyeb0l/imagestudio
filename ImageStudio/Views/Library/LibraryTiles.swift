@@ -12,10 +12,21 @@ struct LibraryTile: View {
             .overlay {
                 StoredImageView(fileName: image.fileName, maxPixelSize: StoredImageView.thumbnailPixelSize)
             }
-            .background { if image.isTransparent { Checkerboard(squareSize: 8) } }
+            .transparencyBackdrop(for: image, squareSize: 8)
             .clipped()
             .overlay {
                 if isSelected { Color.black.opacity(0.18) }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if let badge = image.format.libraryBadge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.55), in: .capsule)
+                        .padding(5)
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if isSelecting {
@@ -27,6 +38,7 @@ struct LibraryTile: View {
             .contentShape(.rect)
             .accessibilityElement()
             .accessibilityLabel(image.prompt)
+            .accessibilityValue(image.format.libraryBadge ?? "")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }

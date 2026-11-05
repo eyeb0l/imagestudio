@@ -79,6 +79,16 @@ struct ReferenceImageTests {
 
 @Suite("Edit requests")
 struct EditRequestTests {
+    @Test func sendsComplexityToModelsThatSupportIt() {
+        var settings = GenerationSettings()
+        settings.model = .sunburst26
+        settings.complexity = .medium
+        let body = OpenAIImageClient.editRequestBody(prompt: "x", settings: settings, references: [], boundary: "B")
+        let text = String(decoding: body, as: UTF8.self)
+        #expect(text.contains("name=\"complexity\"\r\n\r\nmedium\r\n"))
+        #expect(text.contains("name=\"model\"\r\n\r\ngpt-image-2.6-sunburst\r\n"))
+    }
+
     @Test func buildsMultipartBody() throws {
         var settings = GenerationSettings()
         settings.model = .gptImage15
@@ -107,6 +117,7 @@ struct EditRequestTests {
         #expect(field("quality") == "high")
         #expect(field("output_format") == "jpeg")
         #expect(field("output_compression") == "80")
+        #expect(field("complexity") == nil) // not supported by 1.5
         #expect(text.components(separatedBy: "name=\"image[]\"").count - 1 == 2)
         #expect(text.contains("filename=\"reference-2.png\"\r\nContent-Type: image/png\r\n\r\n"))
         #expect(text.hasPrefix("--B\r\n"))
