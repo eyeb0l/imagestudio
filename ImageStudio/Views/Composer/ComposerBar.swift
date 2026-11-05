@@ -10,6 +10,7 @@ struct ComposerBar: View {
     var onSubmit: () -> Void
 
     @State private var showingOptions = false
+    @State private var showingCustomSize = false
     @State private var pickerItems: [PhotosPickerItem] = []
 
     var body: some View {
@@ -54,6 +55,7 @@ struct ComposerBar: View {
         .padding(.horizontal, 12)
         .padding(.bottom, 4)
         .sheet(isPresented: $showingOptions) { ComposerOptionsSheet() }
+        .sheet(isPresented: $showingCustomSize) { ComposerCustomSizeSheet() }
         .animation(.snappy, value: hasReferences)
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
@@ -105,13 +107,14 @@ struct ComposerBar: View {
         .accessibilityLabel("Model, \(settings.model.displayName)")
 
         Menu {
+            // First, as this menu scrolls and a button at the end of it doesn't respond.
+            if settings.model.supportsCustomSizes {
+                Button("Custom Size…", systemImage: "square.dashed") { showingCustomSize = true }
+            }
             Picker("Size", selection: binding(\.size)) {
                 ForEach(sizeOptions(for: settings)) { size in
                     Text(size.isAuto ? "Auto" : "\(size.title)  \(size.dimensionsLabel)").tag(size)
                 }
-            }
-            if settings.model.supportsCustomSizes {
-                Button("Custom Size…", systemImage: "square.dashed") { showingOptions = true }
             }
         } label: {
             OptionChip(title: settings.size.shortLabel, systemImage: "aspectratio",
@@ -207,7 +210,7 @@ struct ComposerBar: View {
 
     /// Whether any option that only appears in the options sheet differs from the defaults.
     private func sheetOptionsDiffer(_ a: GenerationSettings, _ b: GenerationSettings) -> Bool {
-        a.complexity != b.complexity
+        a.complexity != b.complexity || a.svgAuthor != b.svgAuthor
             || a.background != b.background || a.outputFormat != b.outputFormat
             || a.moderation != b.moderation
             || (a.outputFormat.supportsCompression && a.compression != b.compression)
@@ -236,6 +239,32 @@ struct OptionChip: View {
         .frame(height: 30)
         .background(Color(isModified ? .secondarySystemFill : .tertiarySystemFill), in: .capsule)
         .contentShape(.capsule)
+    }
+}
+
+/// Just the custom size fields, for the next generation.
+private struct ComposerCustomSizeSheet: View {
+    @Environment(Composer.self) private var composer
+    @Environment(Preferences.self) private var preferences
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SizePickerView(settings: settings, showsOnlyCustomSize: true, onCustomSizeChosen: { dismiss() })
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", systemImage: "xmark") { dismiss() }
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var settings: Binding<GenerationSettings> {
+        Binding(
+            get: { composer.settings(defaults: preferences.defaults) },
+            set: { composer.applyEdit($0, defaults: preferences.defaults) }
+        )
     }
 }
 

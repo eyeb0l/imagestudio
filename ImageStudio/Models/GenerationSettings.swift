@@ -143,6 +143,26 @@ nonisolated enum ImageComplexity: String, Codable, CaseIterable, Identifiable, S
     }
 }
 
+/// The model that writes an SVG from the reference image, sent as `svg.model`. OpenAI's reference
+/// takes any model name and doesn't list which ones work, so these are its current general models.
+nonisolated enum SVGAuthorModel: String, Codable, CaseIterable, Identifiable, Sendable {
+    case terra = "gpt-6.1-terra"
+    case sol = "gpt-6.1-sol"
+    case astra = "gpt-6-astra"
+    case luna = "gpt-6-luna"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .terra: "GPT-6.1 Terra"
+        case .sol: "GPT-6.1 Sol"
+        case .astra: "GPT-6 Astra"
+        case .luna: "GPT-6 Luna"
+        }
+    }
+}
+
 nonisolated enum ImageBackground: String, Codable, CaseIterable, Identifiable, Sendable {
     case auto, opaque, transparent
 
@@ -435,6 +455,8 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
     var quality: ImageQuality = .auto
     /// Matches the API's default. Only sent to models that support it (see `apiComplexity`).
     var complexity: ImageComplexity = .high
+    /// Only sent for SVG output (see `apiSVGAuthor`).
+    var svgAuthor: SVGAuthorModel = .terra
     var background: ImageBackground = .auto
     var outputFormat: OutputFormat = .png
     var compression: Int = 90
@@ -457,6 +479,11 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
     /// How many images a request in this format can ask for.
     var allowedCountRange: ClosedRange<Int> {
         outputFormat.allowsMultipleImages ? Self.countRange : 1...1
+    }
+
+    /// The value for the `svg.model` request field, or `nil` if the format isn't SVG.
+    var apiSVGAuthor: String? {
+        outputFormat.isVector ? svgAuthor.rawValue : nil
     }
 
     /// The value for the `complexity` request field, or `nil` if the model doesn't accept it.
@@ -502,6 +529,9 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
         if settings.background == .transparent, !settings.outputFormat.supportsTransparency {
             settings.outputFormat = .png
         }
+        if !settings.outputFormat.isVector {
+            settings.svgAuthor = GenerationSettings().svgAuthor
+        }
         if settings.outputFormat.isAnimated {
             let step = Self.frameDurationStep
             let duration = min(max(settings.frameDurationMs, Self.frameDurationRange.lowerBound), Self.frameDurationRange.upperBound)
@@ -521,7 +551,7 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
     // Decoding is lenient so a stale or partially invalid saved value
     // falls back field-by-field instead of discarding everything.
     enum CodingKeys: String, CodingKey {
-        case model, size, quality, complexity, background, outputFormat, compression, moderation, count
+        case model, size, quality, complexity, svgAuthor, background, outputFormat, compression, moderation, count
         case frameCount, frameDurationMs
     }
 
@@ -532,6 +562,7 @@ nonisolated struct GenerationSettings: Codable, Hashable, Sendable {
         size = (try? container.decode(ImageSize.self, forKey: .size)) ?? fallback.size
         quality = (try? container.decode(ImageQuality.self, forKey: .quality)) ?? fallback.quality
         complexity = (try? container.decode(ImageComplexity.self, forKey: .complexity)) ?? fallback.complexity
+        svgAuthor = (try? container.decode(SVGAuthorModel.self, forKey: .svgAuthor)) ?? fallback.svgAuthor
         background = (try? container.decode(ImageBackground.self, forKey: .background)) ?? fallback.background
         outputFormat = (try? container.decode(OutputFormat.self, forKey: .outputFormat)) ?? fallback.outputFormat
         compression = (try? container.decode(Int.self, forKey: .compression)) ?? fallback.compression

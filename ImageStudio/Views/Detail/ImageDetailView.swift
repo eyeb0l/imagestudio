@@ -276,7 +276,7 @@ private struct DetailsGrid: View {
             .font(.subheadline)
             if image.format.isVector {
                 // The API reports authoring separately from image rendering, and may not report it.
-                Text("Quality and complexity apply to the reference image OpenAI creates first. Writing the SVG is billed separately, so the token counts may not cover the whole cost.")
+                Text("Quality and complexity apply to the reference image OpenAI creates first, and Tokens are for that image. Writing the SVG is billed separately, at the author model's rates.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
@@ -312,6 +312,12 @@ private struct DetailsGrid: View {
         ]
         if let input = image.inputTokens, let output = image.outputTokens {
             rows.append(("Tokens", "\(input.formatted()) in · \(output.formatted()) out"))
+        }
+        if let author = image.svgAuthorModel {
+            rows.append(("SVG Author", SVGAuthorModel(rawValue: author)?.displayName ?? author))
+        }
+        if let input = image.svgInputTokens, let output = image.svgOutputTokens {
+            rows.append(("Author Tokens", "\(input.formatted()) in · \(output.formatted()) out"))
         }
         return rows
     }

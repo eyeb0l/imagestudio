@@ -19,7 +19,7 @@ GIF_ERROR = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 failures = 0
 
 # Request fields echoed to the log, in order. Add new options here.
-LOGGED_FIELDS = ("model", "complexity", "output_format", "output_compression", "frame_count", "frame_duration_ms")
+LOGGED_FIELDS = ("model", "complexity", "output_format", "output_compression", "frame_count", "frame_duration_ms", "svg")
 
 def png(w, h, seed):
     rows = []
@@ -244,8 +244,8 @@ def rejection(path, fields):
         for name in ("output_compression", "prompt_rewriter", "stream", "partial_images"):
             if name in fields:
                 return f"SVG output does not support {name}."
-        if "svg" in fields:
-            return "Your organization does not have access to SVG model selection. Omit the svg object."
+        if not (fields.get("svg") or {}).get("model"):
+            return "SVG generation requires 'svg.model'."
     return None
 
 def gif_error_message(status):

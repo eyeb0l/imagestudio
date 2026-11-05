@@ -145,6 +145,9 @@ nonisolated struct OpenAIImageClient: Sendable {
         var outputFormat: String?
         var inputTokens: Int?
         var outputTokens: Int?
+        /// What the model that wrote an SVG used, separately from the reference image.
+        var svgInputTokens: Int? = nil
+        var svgOutputTokens: Int? = nil
     }
 
     // MARK: Requests
@@ -246,9 +249,14 @@ nonisolated struct OpenAIImageClient: Sendable {
         let outputCompression: Int?
         let frameCount: Int?
         let frameDurationMs: Int?
+        let svg: SVGOptions?
+
+        struct SVGOptions: Encodable {
+            let model: String
+        }
 
         enum CodingKeys: String, CodingKey {
-            case model, prompt, n, size, quality, complexity, background, moderation
+            case model, prompt, n, size, quality, complexity, background, moderation, svg
             case outputFormat = "output_format"
             case outputCompression = "output_compression"
             case frameCount = "frame_count"
@@ -270,7 +278,8 @@ nonisolated struct OpenAIImageClient: Sendable {
             outputFormat: settings.outputFormat.rawValue,
             outputCompression: settings.outputFormat.supportsCompression ? settings.compression : nil,
             frameCount: settings.apiFrameCount,
-            frameDurationMs: settings.apiFrameDurationMs
+            frameDurationMs: settings.apiFrameDurationMs,
+            svg: settings.apiSVGAuthor.map(RequestBody.SVGOptions.init(model:))
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
@@ -294,6 +303,7 @@ nonisolated struct OpenAIImageClient: Sendable {
         let background: String?
         let outputFormat: String?
         let usage: Usage?
+        let svgUsage: Usage?
     }
 
     private struct ErrorEnvelope: Decodable {
@@ -333,7 +343,9 @@ nonisolated struct OpenAIImageClient: Sendable {
             background: decoded.background,
             outputFormat: decoded.outputFormat,
             inputTokens: decoded.usage?.inputTokens,
-            outputTokens: decoded.usage?.outputTokens
+            outputTokens: decoded.usage?.outputTokens,
+            svgInputTokens: decoded.svgUsage?.inputTokens,
+            svgOutputTokens: decoded.svgUsage?.outputTokens
         )
     }
 

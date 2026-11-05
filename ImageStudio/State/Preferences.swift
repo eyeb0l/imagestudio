@@ -136,6 +136,7 @@ final class Composer {
         apply(\.size)
         apply(\.quality)
         apply(\.complexity)
+        apply(\.svgAuthor)
         apply(\.background)
         apply(\.outputFormat)
         apply(\.compression)

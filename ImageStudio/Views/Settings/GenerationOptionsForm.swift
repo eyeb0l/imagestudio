@@ -64,6 +64,12 @@ struct GenerationOptionsForm: View {
                 ForEach(settings.model.formats(hasReferences: hasReferences)) { Text($0.displayName).tag($0) }
             }
 
+            if settings.outputFormat.isVector {
+                Picker("SVG Author", selection: $settings.svgAuthor) {
+                    ForEach(SVGAuthorModel.allCases) { Text($0.displayName).tag($0) }
+                }
+            }
+
             if settings.outputFormat.supportsCompression {
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledContent("Compression", value: "\(settings.compression)%")
@@ -189,34 +195,43 @@ struct ModelPickerView: View {
 
 struct SizePickerView: View {
     @Binding var settings: GenerationSettings
+    /// Opened just to enter a custom size, so that's all it shows, ready to type in.
+    var showsOnlyCustomSize = false
+    /// Called when a custom size is chosen, for a sheet that was opened just to do that.
+    var onCustomSizeChosen: () -> Void = {}
 
     @State private var customWidth = ""
     @State private var customHeight = ""
-    @FocusState private var customFocused: Bool
+    private enum CustomField { case width, height }
+    @FocusState private var focusedField: CustomField?
 
     var body: some View {
         List {
-            Section {
-                ForEach(ImageSize.standardPresets) { row(for: $0) }
-            } footer: {
-                if !settings.model.supportsCustomSizes {
-                    Text("Larger and custom sizes are available with GPT Image 2 and later.")
-                }
-            }
-
-            if settings.model.supportsCustomSizes {
-                Section {
-                    ForEach(ImageSize.extendedPresets) { row(for: $0) }
-                } header: {
-                    Text("More Sizes")
-                } footer: {
-                    Text("Sizes above 2560 × 1440 are experimental.")
-                }
-
+            if showsOnlyCustomSize {
                 customSection
+            } else {
+                Section {
+                    ForEach(ImageSize.standardPresets) { row(for: $0) }
+                } footer: {
+                    if !settings.model.supportsCustomSizes {
+                        Text("Larger and custom sizes are available with GPT Image 2 and later.")
+                    }
+                }
+
+                if settings.model.supportsCustomSizes {
+                    Section {
+                        ForEach(ImageSize.extendedPresets) { row(for: $0) }
+                    } header: {
+                        Text("More Sizes")
+                    } footer: {
+                        Text("Sizes above 2560 × 1440 are experimental.")
+                    }
+
+                    customSection
+                }
             }
         }
-        .navigationTitle("Size")
+        .navigationTitle(showsOnlyCustomSize ? "Custom Size" : "Size")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             let isPreset = settings.model.sizePresets.contains(settings.size)
@@ -224,6 +239,7 @@ struct SizePickerView: View {
                 customWidth = String(settings.size.width)
                 customHeight = String(settings.size.height)
             }
+            if showsOnlyCustomSize { focusedField = .width }
         }
     }
 
@@ -269,18 +285,19 @@ struct SizePickerView: View {
             HStack {
                 TextField("Width", text: $customWidth)
                     .keyboardType(.numberPad)
-                    .focused($customFocused)
+                    .focused($focusedField, equals: .width)
                 Text("×").foregroundStyle(.secondary)
                 TextField("Height", text: $customHeight)
                     .keyboardType(.numberPad)
-                    .focused($customFocused)
+                    .focused($focusedField, equals: .height)
                     .multilineTextAlignment(.trailing)
             }
             .font(.body.monospacedDigit())
 
             Button(settings.size == candidate ? "Using Custom Size" : "Use Custom Size") {
                 settings.size = candidate
-                customFocused = false
+                focusedField = nil
+                onCustomSizeChosen()
             }
             .disabled(message != nil || settings.size == candidate)
         } header: {

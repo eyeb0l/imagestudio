@@ -183,7 +183,7 @@ struct SVGRequestTests {
         #expect(body["model"] as? String == "gpt-image-2.6-sunburst")
         #expect(body["quality"] as? String == "xhigh")
         #expect(body["complexity"] as? String == "low")
-        for field in ["output_compression", "frame_count", "frame_duration_ms", "svg", "prompt_rewriter", "stream", "partial_images"] {
+        for field in ["output_compression", "frame_count", "frame_duration_ms", "prompt_rewriter", "stream", "partial_images"] {
             #expect(body[field] == nil, "\(field)")
         }
     }
@@ -505,6 +505,68 @@ struct SVGDocumentTests {
         #expect(unreadable.width == 5 && unreadable.height == 6)
         let unknown = ImageStore.dimensions(of: Data([1]), format: .png, reported: nil)
         #expect(unknown.width == 0 && unknown.height == 0)
+    }
+}
+
+@Suite("SVG author")
+struct SVGAuthorTests {
+    private func body(_ settings: GenerationSettings) throws -> [String: Any] {
+        let data = try OpenAIImageClient.requestBody(prompt: "x", settings: settings)
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test func sendsTheAuthorModelForSVG() throws {
+        var settings = GenerationSettings()
+        settings.outputFormat = .svg
+        #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6.1-terra"])
+        settings.svgAuthor = .astra
+        #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6-astra"])
+    }
+
+    @Test func sendsNoAuthorForOtherFormats() throws {
+        for format in [OutputFormat.png, .jpeg, .webp, .gif] {
+            var settings = GenerationSettings()
+            settings.outputFormat = format
+            settings.svgAuthor = .astra
+            #expect(try body(settings)["svg"] == nil, "\(format)")
+            #expect(settings.normalized().svgAuthor == .terra)
+        }
+    }
+
+    @Test func decodingIsLenient() throws {
+        let saved = #"{"outputFormat":"svg","svgAuthor":"gpt-99"}"#
+        #expect(try JSONDecoder().decode(GenerationSettings.self, from: Data(saved.utf8)).svgAuthor == .terra)
+        let chosen = #"{"outputFormat":"svg","svgAuthor":"gpt-6.1-sol"}"#
+        #expect(try JSONDecoder().decode(GenerationSettings.self, from: Data(chosen.utf8)).svgAuthor == .sol)
+    }
+
+    @Test func readsTheAuthorsUsage() throws {
+        let payload = """
+        {"data":[{"b64_json":"\(TestSVG.sampleData.base64EncodedString())"}],"output_format":"svg",
+         "usage":{"input_tokens":9,"output_tokens":4160},
+         "svg_usage":{"input_tokens":120,"model":"m","output_tokens":900,"reasoning_tokens":0,"total_tokens":1020}}
+        """
+        let response = HTTPURLResponse(url: URL(string: "https://api.openai.com/v1/images/generations")!, statusCode: 200,
+                                       httpVersion: nil, headerFields: nil)!
+        let output = try OpenAIImageClient.parseGeneration(data: Data(payload.utf8), response: response)
+        #expect(output.outputTokens == 4160)
+        #expect(output.svgInputTokens == 120)
+        #expect(output.svgOutputTokens == 900)
+    }
+
+    @Test func regenerationKeepsTheAuthor() {
+        var settings = GenerationSettings()
+        settings.outputFormat = .svg
+        settings.svgAuthor = .sol
+        let image = GeneratedImage(prompt: "p", settings: settings, width: 1, height: 1, fileName: "f.svg", fileSize: 1,
+                                   batchID: UUID(), duration: 1, svgInputTokens: 120, svgOutputTokens: 900)
+        #expect(image.svgAuthorModel == "gpt-6.1-sol")
+        #expect(image.settings.svgAuthor == .sol)
+        #expect(image.svgOutputTokens == 900)
+
+        let png = GeneratedImage(prompt: "p", settings: GenerationSettings(), width: 1, height: 1, fileName: "f.png",
+                                 fileSize: 1, batchID: UUID(), duration: 1)
+        #expect(png.svgAuthorModel == nil)
     }
 }
 

@@ -16,6 +16,10 @@ final class GeneratedImage {
     var quality: String
     /// `nil` for images from models without complexity control, and for existing libraries.
     var complexity: String?
+    /// The model that wrote the file, and what it used. `nil` for anything but an SVG.
+    var svgAuthorModel: String?
+    var svgInputTokens: Int?
+    var svgOutputTokens: Int?
     var background: String
     var outputFormat: String
     var outputCompression: Int?
@@ -62,6 +66,8 @@ final class GeneratedImage {
         duration: TimeInterval,
         inputTokens: Int? = nil,
         outputTokens: Int? = nil,
+        svgInputTokens: Int? = nil,
+        svgOutputTokens: Int? = nil,
         referenceFileNames: [String] = [],
         markupFileName: String? = nil
     ) {
@@ -73,6 +79,9 @@ final class GeneratedImage {
         self.requestedSize = settings.size.apiValue
         self.quality = settings.quality.rawValue
         self.complexity = settings.apiComplexity
+        self.svgAuthorModel = settings.apiSVGAuthor
+        self.svgInputTokens = svgInputTokens
+        self.svgOutputTokens = svgOutputTokens
         self.background = settings.background.rawValue
         self.outputFormat = settings.outputFormat.rawValue
         self.outputCompression = settings.outputFormat.supportsCompression ? settings.compression : nil
@@ -119,6 +128,7 @@ extension GeneratedImage {
         settings.size = ImageSize(apiValue: requestedSize) ?? .auto
         settings.quality = ImageQuality(rawValue: quality) ?? .auto
         settings.complexity = complexity.flatMap(ImageComplexity.init(rawValue:)) ?? settings.complexity
+        settings.svgAuthor = svgAuthorModel.flatMap(SVGAuthorModel.init(rawValue:)) ?? settings.svgAuthor
         settings.background = ImageBackground(rawValue: background) ?? .auto
         settings.outputFormat = format
         settings.compression = outputCompression ?? settings.compression

@@ -330,6 +330,8 @@ final class Studio {
                 duration: duration,
                 inputTokens: share(output.inputTokens),
                 outputTokens: share(output.outputTokens),
+                svgInputTokens: output.svgInputTokens,
+                svgOutputTokens: output.svgOutputTokens,
                 referenceFileNames: ticket.referenceFileNames,
                 markupFileName: ticket.markupFileName
             )
