@@ -477,7 +477,7 @@ final class Studio {
         if !deleted.isEmpty { libraryObserver.imagesDeleted(deleted) }
     }
 
-    private func existingImageIDs(among ids: [UUID]) -> [UUID] {
+    func existingImageIDs(among ids: [UUID]) -> [UUID] {
         do {
             return try context.fetch(FetchDescriptor<GeneratedImage>(predicate: #Predicate { ids.contains($0.id) })).map(\.id)
         } catch {
@@ -494,22 +494,23 @@ final class Studio {
     /// saved at once. Images already in the library keep their record, as images never change, but
     /// get back any reference or markup file they're missing.
     ///
-    /// Returns the IDs that are now complete in the library, and those to deliver again: not added,
-    /// or added without a reference or markup file that came with them.
+    /// Returns the IDs that are now complete in the library; those in it but missing a reference or
+    /// markup file that came with them, to deliver again; and those that couldn't be added at all.
     func addSyncedImages(
         _ images: [SyncedImage],
         installFile: (URL, URL) throws -> Bool = Studio.copyIfMissing
-    ) -> (present: [UUID], failed: [UUID]) {
-        guard !images.isEmpty else { return ([], []) }
+    ) -> (present: [UUID], incomplete: [UUID], failed: [UUID]) {
+        guard !images.isEmpty else { return ([], [], []) }
         let ids = images.map(\.id)
         let existing: Set<UUID>
         do {
             existing = Set(try context.fetch(FetchDescriptor<GeneratedImage>(predicate: #Predicate { ids.contains($0.id) })).map(\.id))
         } catch {
             Self.log.error("Couldn't look up synced images: \(error.localizedDescription, privacy: .public)")
-            return ([], ids)
+            return ([], [], ids)
         }
         var present: [UUID] = []
+        var incomplete: [UUID] = []
         var failed: [UUID] = []
         var inserted: [(record: GeneratedImage, complete: Bool)] = []
         var copiedImageFiles: [String] = []
@@ -529,7 +530,7 @@ final class Studio {
 
         for image in images {
             if existing.contains(image.id) {
-                if installStoreFiles(of: image) { present.append(image.id) } else { failed.append(image.id) }
+                if installStoreFiles(of: image) { present.append(image.id) } else { incomplete.append(image.id) }
                 continue
             }
             guard !inserted.contains(where: { $0.record.id == image.id }) else { continue }
@@ -551,18 +552,18 @@ final class Studio {
             inserted.append((record, installStoreFiles(of: image)))
         }
 
-        guard !inserted.isEmpty else { return (present, failed) }
+        guard !inserted.isEmpty else { return (present, incomplete, failed) }
         do {
             try context.save()
             present += inserted.filter(\.complete).map(\.record.id)
-            failed += inserted.filter { !$0.complete }.map(\.record.id)
+            incomplete += inserted.filter { !$0.complete }.map(\.record.id)
         } catch {
             Self.log.error("Couldn't save synced images: \(error.localizedDescription, privacy: .public)")
             for item in inserted { context.delete(item.record) }
             for name in copiedImageFiles { try? ImageStore.delete(fileName: name) }
             failed += inserted.map(\.record.id)
         }
-        return (present, failed)
+        return (present, incomplete, failed)
     }
 
     /// Where a synced image's file goes. Usually the name it had on the other device; a file already

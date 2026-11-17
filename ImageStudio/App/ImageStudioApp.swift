@@ -100,15 +100,14 @@ final class AppModel {
     /// Sync on, the fresh library downloads everything in iCloud again.
     func resetLibrary(date: Date = .now) {
         do {
-            try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date)
+            // Sync state describes the old library (what it has from iCloud), so it goes with it.
+            try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date, companions: [syncStateURL])
         } catch {
             resetFailure = "The library couldn't be moved to a backup, so nothing was changed. \(error.localizedDescription)"
             return
         }
         // Images in the new library are rendered afresh when they're next shown.
         rasterCache.removeAll()
-        // Sync state describes the old library: what it already has from iCloud.
-        try? FileManager.default.removeItem(at: syncStateURL)
         resetFailure = nil
         simulatesFailure = false
         tryOpen()
@@ -202,9 +201,13 @@ enum LibraryStore {
     /// was nothing to move.
     @discardableResult
     nonisolated static func moveStoreFiles(from storeURL: URL, to backupsDirectory: URL, date: Date = .now,
+                                           companions: [URL] = [],
                                            fileManager: FileManager = .default) throws -> URL? {
-        let sources = ["", "-shm", "-wal"]
-            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) }
+        // Companions (the sync state) go first: if this stops part way, the old store is never left
+        // without them while a fresh one would have them. A fresh library with the old sync state would
+        // take every image missing from it as deleted, and delete it from iCloud.
+        let sources = (companions + ["", "-shm", "-wal"]
+            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) })
             .filter { fileManager.fileExists(atPath: $0.path(percentEncoded: false)) }
         guard !sources.isEmpty else { return nil }
 

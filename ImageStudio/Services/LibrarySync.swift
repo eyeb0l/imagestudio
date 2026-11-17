@@ -28,6 +28,9 @@ nonisolated struct LibrarySyncState: Codable {
     var remoteDeletions: Set<String> = []
     /// Images that arrived but couldn't be added (e.g. the disk was full), fetched again later.
     var failedDownloads: Set<String> = []
+    /// Images added without a reference or markup file that came with them, fetched again to fill
+    /// the gap. Only ever repaired, never added again: if one is deleted here, it stays deleted.
+    var incompleteDownloads: Set<String> = []
 
     static let defaultURL = URL.applicationSupportDirectory.appending(path: "Library Sync.json", directoryHint: .notDirectory)
 
@@ -69,6 +72,7 @@ nonisolated struct LibrarySyncState: Codable {
         uploaded = []
         pendingDeletions = []
         failedDownloads = []
+        incompleteDownloads = []
     }
 }
 
@@ -125,6 +129,8 @@ final class LibrarySync: LibraryObserver {
     @ObservationIgnored private var approvesAccountChange = false
     /// The engine whose account is being checked, so there's one check at a time for each.
     @ObservationIgnored private weak var checkingEngine: CKSyncEngine?
+    /// The account may have changed while a check was under way, so its answer is out of date.
+    @ObservationIgnored private var recheckAccount = false
 
     // What the status is worked out from.
     @ObservationIgnored private var accountProblem: String?
@@ -203,9 +209,14 @@ final class LibrarySync: LibraryObserver {
 
     /// Checks which account is signed in before anything is sent to it.
     private func checkAccount() {
-        guard usesCloudKit, let current = engine, checkingEngine !== current else { return }
+        guard usesCloudKit, let current = engine else { return }
         accountConfirmed = false
+        guard checkingEngine !== current else {
+            recheckAccount = true
+            return
+        }
         checkingEngine = current
+        recheckAccount = false
         Task {
             let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
             let problem: String?
@@ -226,6 +237,10 @@ final class LibrarySync: LibraryObserver {
             }
             if checkingEngine === current { checkingEngine = nil }
             guard current === engine else { return }
+            if recheckAccount {
+                checkAccount()
+                return
+            }
             accountProblem = problem
             if let userID {
                 confirmAccount(userID)
@@ -247,6 +262,8 @@ final class LibrarySync: LibraryObserver {
                 return
             }
             Self.log.notice("Syncing with a different iCloud account, as agreed")
+            // Used up here, so it can't also cover another account the restarted check might find.
+            approvesAccountChange = false
             state.forgetServer()
             state.accountID = userID
             persist()
@@ -276,6 +293,7 @@ final class LibrarySync: LibraryObserver {
         // still being retried is dropped, so it can't bring the image back.
         state.pendingDeletions.formUnion(ids.map(\.uuidString))
         state.failedDownloads.subtract(ids.map(\.uuidString))
+        state.incompleteDownloads.subtract(ids.map(\.uuidString))
         persist()
         if canSend { queueDeletions(ids) }
     }
@@ -403,7 +421,7 @@ final class LibrarySync: LibraryObserver {
             .unavailable(accountProblem)
         } else if let syncError {
             .failed(syncError)
-        } else if !state.failedDownloads.isEmpty {
+        } else if !state.failedDownloads.isEmpty || !state.incompleteDownloads.isEmpty {
             .failed("Some images couldn't be downloaded. Image Studio will try again.")
         } else if let engine, accountConfirmed, hasFetched, !isBusy,
                   state.pendingDeletions.isEmpty, state.remoteDeletions.isEmpty,
@@ -462,17 +480,14 @@ final class LibrarySync: LibraryObserver {
             }
             return image
         }.filter { state.accepts($0.id) && !deletedNames.contains($0.id.uuidString) }
-        let result = studio.addSyncedImages(images)
-        state.uploaded.formUnion(result.present.map(\.uuidString))
-        state.uploaded.formUnion(result.failed.map(\.uuidString))
-        state.failedDownloads.subtract(result.present.map(\.uuidString))
-        state.failedDownloads.formUnion(result.failed.map(\.uuidString))
+        record(studio.addSyncedImages(images))
 
         if !deleted.isEmpty {
             // Gone from iCloud, so nothing is owed there; any queued upload is cancelled.
             engine?.state.remove(pendingRecordZoneChanges: deleted.map { .saveRecord(LibraryRecord.recordID(for: $0)) })
             state.uploaded.subtract(deletedNames)
             state.failedDownloads.subtract(deletedNames)
+            state.incompleteDownloads.subtract(deletedNames)
             state.pendingDeletions.subtract(deletedNames)
             // Kept until removed here, so a failure can't make them look like new images to upload.
             state.remoteDeletions.formUnion(deletedNames)
@@ -526,10 +541,23 @@ final class LibrarySync: LibraryObserver {
         queueUploads(retry)
     }
 
-    /// Fetches records again whose images couldn't be added when they first arrived.
+    /// Notes how adding downloaded images went. Images in the library count as in iCloud.
+    private func record(_ result: (present: [UUID], incomplete: [UUID], failed: [UUID])) {
+        let present = Set(result.present.map(\.uuidString))
+        let incomplete = Set(result.incomplete.map(\.uuidString))
+        let failed = Set(result.failed.map(\.uuidString))
+        state.uploaded.formUnion(present.union(incomplete))
+        state.failedDownloads.subtract(present.union(incomplete))
+        state.failedDownloads.formUnion(failed)
+        state.incompleteDownloads.subtract(present)
+        state.incompleteDownloads.formUnion(incomplete)
+    }
+
+    /// Fetches records again whose images couldn't be added, or were added without all their files.
     private func retryFailedDownloads() {
-        guard canSend, let engine, !state.failedDownloads.isEmpty else { return }
-        let recordIDs = state.failedDownloads.map { CKRecord.ID(recordName: $0, zoneID: LibraryRecord.zoneID) }
+        let names = state.failedDownloads.union(state.incompleteDownloads)
+        guard canSend, let engine, !names.isEmpty else { return }
+        let recordIDs = names.map { CKRecord.ID(recordName: $0, zoneID: LibraryRecord.zoneID) }
         Task {
             guard let results = try? await engine.database.records(for: recordIDs) else { return }
             guard engine === self.engine else { return }
@@ -539,14 +567,22 @@ final class LibrarySync: LibraryObserver {
                 case .success(let record): records.append(record)
                 case .failure(let error as CKError) where error.code == .unknownItem:
                     state.failedDownloads.remove(recordID.recordName)
+                    state.incompleteDownloads.remove(recordID.recordName)
                 case .failure: break
                 }
             }
-            // Only what's still wanted: the image may have been deleted while this was fetched.
-            let wanted = records.compactMap(LibraryRecord.decode)
-                .filter { state.failedDownloads.contains($0.id.uuidString) && state.accepts($0.id) }
-            let result = studio.addSyncedImages(wanted)
-            state.failedDownloads.subtract(result.present.map(\.uuidString))
+            // Only what's still wanted: the image may have been deleted while this was fetched. An
+            // incomplete image is only repaired if it's still in the library.
+            let images = records.compactMap(LibraryRecord.decode).filter { state.accepts($0.id) }
+            let inLibrary = Set(studio.existingImageIDs(among: images.map(\.id)))
+            let wanted = images.filter { image in
+                let name = image.id.uuidString
+                if state.failedDownloads.contains(name) { return true }
+                guard state.incompleteDownloads.contains(name) else { return false }
+                if !inLibrary.contains(image.id) { state.incompleteDownloads.remove(name) }
+                return inLibrary.contains(image.id)
+            }
+            record(studio.addSyncedImages(wanted))
             persist()
             refreshStatus()
         }

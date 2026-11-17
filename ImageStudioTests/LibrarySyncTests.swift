@@ -211,7 +211,7 @@ struct LibrarySyncApplyTests {
         }
 
         let first = studio.addSyncedImages([image])
-        #expect(first.present == [image.id] && first.failed.isEmpty)
+        #expect(first.present == [image.id] && first.failed.isEmpty && first.incomplete.isEmpty)
         #expect(try Data(contentsOf: ImageStore.url(for: image.fileName)) == Data("IMAGE".utf8))
         #expect(try Data(contentsOf: ReferenceStore.url(for: referenceName)) == Data("REF".utf8))
         let saved = try #require(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()).first)
@@ -317,7 +317,7 @@ struct LibrarySyncApplyTests {
             if destination.lastPathComponent == referenceName { throw Interrupted() }
             return try Studio.copyIfMissing(from: source, to: destination)
         }
-        #expect(first.failed == [image.id], "Added, but to be delivered again for its reference.")
+        #expect(first.incomplete == [image.id] && first.failed.isEmpty, "Added, but to be delivered again for its reference.")
         #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 1)
         #expect(!ReferenceStore.fileExists(referenceName))
 
@@ -449,14 +449,16 @@ struct LibrarySyncStateTests {
     }
 
     @Test func infersDeletionsThatWereNeverRecorded() {
-        let (kept, deleted, downloading, removing) = (UUID(), UUID(), UUID(), UUID())
+        let (kept, deleted, downloading, removing, incomplete) = (UUID(), UUID(), UUID(), UUID(), UUID())
         var state = LibrarySyncState()
-        state.uploaded = Set([kept, deleted, downloading, removing].map(\.uuidString))
+        state.uploaded = Set([kept, deleted, removing, incomplete].map(\.uuidString))
         state.failedDownloads = [downloading.uuidString]
         state.remoteDeletions = [removing.uuidString]
+        // Added without its reference, then deleted: still a deletion, not a download to retry.
+        state.incompleteDownloads = [incomplete.uuidString]
 
-        // Only `kept` is in the library: `deleted` went without its deletion reaching the state file.
-        #expect(state.deletedLocally(library: [kept]) == [deleted.uuidString])
+        // Only `kept` is in the library: the others went without their deletion reaching the state file.
+        #expect(state.deletedLocally(library: [kept]) == [deleted.uuidString, incomplete.uuidString])
     }
 
     @Test func aNewAccountStillRemovesWhatWasDeletedInICloud() {
@@ -504,12 +506,29 @@ struct LibrarySyncStateTests {
         let syncState = directory.appending(path: "Library Sync.json")
         try LibrarySyncState().save(to: syncState)
 
-        let model = AppModel(simulatesFailure: true, storeURL: store,
-                             backupsDirectory: directory.appending(path: "Library Backups"), syncStateURL: syncState) {
+        let backups = directory.appending(path: "Library Backups")
+        let model = AppModel(simulatesFailure: true, storeURL: store, backupsDirectory: backups, syncStateURL: syncState) {
             try makeContainer()
         }
         model.resetLibrary()
 
-        #expect(!exists(syncState), "A fresh library downloads everything in iCloud again.")
+        // A fresh library downloads everything in iCloud again. With the old state it would take
+        // every image as deleted here, and delete it from iCloud.
+        #expect(!exists(syncState))
+        let backup = try #require(try FileManager.default.contentsOfDirectory(at: backups, includingPropertiesForKeys: nil).first)
+        #expect(exists(backup.appending(path: "Library Sync.json")) && exists(backup.appending(path: "default.store")))
+    }
+
+    @Test func movesSyncStateEvenWithoutAStore() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let syncState = directory.appending(path: "Library Sync.json")
+        try LibrarySyncState().save(to: syncState)
+
+        let backup = try LibraryStore.moveStoreFiles(from: directory.appending(path: "default.store"),
+                                                     to: directory.appending(path: "Library Backups"),
+                                                     companions: [syncState])
+        #expect(!exists(syncState))
+        #expect(exists(try #require(backup).appending(path: "Library Sync.json")))
     }
 }
