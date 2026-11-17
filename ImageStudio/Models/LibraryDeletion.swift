@@ -19,27 +19,47 @@ final class LibraryDeletion {
     @Attribute(.unique) var imageID: UUID
     /// A `Kind`'s raw value.
     var kind: String
+    /// For a pending deletion, the iCloud account (user record name) it's owed to: the one the library
+    /// synced with when the image was deleted. It's only ever sent there, so it can't delete another
+    /// account's copy. `nil` if the library synced with none, and then it's never sent. Either way it
+    /// keeps the image out of this library.
+    var accountID: String?
 
-    init(imageID: UUID, kind: Kind) {
+    init(imageID: UUID, kind: Kind, accountID: String? = nil) {
         self.imageID = imageID
         self.kind = kind.rawValue
+        self.accountID = kind == .pending ? accountID : nil
     }
 }
 
 extension LibraryDeletion {
+    /// What's recorded, by record name (the image's UUID string).
+    nonisolated struct Summary: Sendable {
+        /// Every image deleted here that iCloud hasn't confirmed.
+        var pending: Set<String> = []
+        /// Those, by the account they're owed to.
+        var owed: [String: Set<String>] = [:]
+        var remote: Set<String> = []
+    }
+
     /// Records deletions in `context`, without saving it, so they're saved with the change they
-    /// describe. An image already deleted in iCloud stays recorded as that: its deletion has nothing
-    /// left to tell iCloud.
-    static func record(_ ids: some Collection<UUID>, as kind: Kind, in context: ModelContext) throws {
+    /// describe. A pending deletion is owed to `accountID`. One already recorded keeps its account,
+    /// and an image already deleted in iCloud stays recorded as that: there's nothing left to tell
+    /// iCloud.
+    static func record(_ ids: some Collection<UUID>, as kind: Kind, owedTo accountID: String? = nil,
+                       in context: ModelContext) throws {
         guard !ids.isEmpty else { return }
         let ids = Array(Set(ids))
         var known = Dictionary(try context.fetch(FetchDescriptor<LibraryDeletion>(predicate: #Predicate { ids.contains($0.imageID) }))
             .map { ($0.imageID, $0) }, uniquingKeysWith: { first, _ in first })
         for id in ids {
             if let entry = known[id] {
-                if kind == .remote { entry.kind = Kind.remote.rawValue }
+                if kind == .remote {
+                    entry.kind = Kind.remote.rawValue
+                    entry.accountID = nil
+                }
             } else {
-                let entry = LibraryDeletion(imageID: id, kind: kind)
+                let entry = LibraryDeletion(imageID: id, kind: kind, accountID: accountID)
                 context.insert(entry)
                 known[id] = entry
             }
@@ -56,23 +76,23 @@ extension LibraryDeletion {
         }
     }
 
-    /// Forgets every deletion of `kind`, without saving.
-    static func forgetAll(_ kind: Kind, in context: ModelContext) throws {
-        let raw = kind.rawValue
-        try context.delete(model: LibraryDeletion.self, where: #Predicate { $0.kind == raw })
+    /// Forgets the pending deletions owed to `accountID`, without saving.
+    static func forgetPending(owedTo accountID: String, in context: ModelContext) throws {
+        let pending = Kind.pending.rawValue
+        try context.delete(model: LibraryDeletion.self, where: #Predicate { $0.kind == pending && $0.accountID == accountID })
     }
 
-    /// Every recorded deletion, by kind, as record names (the images' UUID strings).
-    static func all(in context: ModelContext) throws -> (pending: Set<String>, remote: Set<String>) {
-        var pending: Set<String> = []
-        var remote: Set<String> = []
+    static func all(in context: ModelContext) throws -> Summary {
+        var summary = Summary()
         for entry in try context.fetch(FetchDescriptor<LibraryDeletion>()) {
+            let name = entry.imageID.uuidString
             if entry.kind == Kind.remote.rawValue {
-                remote.insert(entry.imageID.uuidString)
+                summary.remote.insert(name)
             } else {
-                pending.insert(entry.imageID.uuidString)
+                summary.pending.insert(name)
+                if let account = entry.accountID { summary.owed[account, default: []].insert(name) }
             }
         }
-        return (pending, remote)
+        return summary
     }
 }

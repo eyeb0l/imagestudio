@@ -457,7 +457,10 @@ final class Studio {
     func delete(_ images: [GeneratedImage]) {
         let ids = images.map(\.id)
         let references = images.flatMap(\.referenceStoreFileNames)
-        let problem = Self.deleteImages(images, in: context, journal: { try LibraryDeletion.record(ids, as: .pending, in: $0) })
+        let account = libraryObserver?.accountID
+        let problem = Self.deleteImages(images, in: context, journal: {
+            try LibraryDeletion.record(ids, as: .pending, owedTo: account, in: $0)
+        })
         if let problem { alertMessage = problem }
         releaseReferences(references)
         announceDeleted(ids)
@@ -475,8 +478,9 @@ final class Studio {
             alertMessage = "Couldn't delete your images: \(error.localizedDescription)"
             return
         }
+        let account = libraryObserver?.accountID
         let problem = Self.deleteEverything(in: context, removeAllFiles: removeAllImageFiles,
-                                            journal: { try LibraryDeletion.record(ids, as: .pending, in: $0) })
+                                            journal: { try LibraryDeletion.record(ids, as: .pending, owedTo: account, in: $0) })
         if let problem { alertMessage = problem }
         removeOrphanedReferences(referencedFileNames().union(held))
         announceDeleted(ids)

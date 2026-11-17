@@ -107,7 +107,7 @@ final class AppModel {
     func resetLibrary(date: Date = .now) {
         // Deletions iCloud hasn't been told about go with the old library, and the new one would
         // download those images again. They're set aside first, so the reset can stop at any point
-        // and still keep them; the next library to sync with their account takes them on.
+        // and still keep them; the next library to open takes them on.
         do {
             try UnsentDeletions.setAside(from: storeURL, syncStateURL: syncStateURL, to: unsentDeletionsURL)
         } catch {
@@ -221,28 +221,29 @@ enum LibraryStore {
     /// from its SQLite file, as it's usually a library that can't be opened. Empty for a store from
     /// before deletions were kept in it. A damaged store gives what could be read, maybe nothing:
     /// it's still reset, as otherwise it never could be, and those images download again.
-    nonisolated static func pendingDeletions(inStoreAt url: URL) -> Set<String> {
+    nonisolated static func pendingDeletions(inStoreAt url: URL) -> [(id: String, accountID: String?)] {
         var database: OpaquePointer?
         defer { sqlite3_close(database) }
-        func fail(_ step: String) -> Set<String> {
+        func fail(_ step: String) -> [(id: String, accountID: String?)] {
             log.error("Couldn't \(step, privacy: .public) the library's deletions: \(String(cString: sqlite3_errmsg(database)), privacy: .public)")
             return []
         }
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [] }
         guard sqlite3_open_v2(url.path(percentEncoded: false), &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return fail("open") }
         // Core Data's names for the `LibraryDeletion` entity and its attributes; UUIDs are 16-byte blobs.
-        let query = "SELECT ZIMAGEID FROM ZLIBRARYDELETION WHERE ZKIND = '\(LibraryDeletion.Kind.pending.rawValue)'"
+        let query = "SELECT ZIMAGEID, ZACCOUNTID FROM ZLIBRARYDELETION WHERE ZKIND = '\(LibraryDeletion.Kind.pending.rawValue)'"
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }
         guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else {
             // An older store has no such table.
             return String(cString: sqlite3_errmsg(database)).hasPrefix("no such table") ? [] : fail("read")
         }
-        var ids: Set<String> = []
+        var ids: [(id: String, accountID: String?)] = []
         var result = sqlite3_step(statement)
         while result == SQLITE_ROW {
             if sqlite3_column_bytes(statement, 0) == MemoryLayout<uuid_t>.size, let bytes = sqlite3_column_blob(statement, 0) {
-                ids.insert(UUID(uuid: bytes.loadUnaligned(as: uuid_t.self)).uuidString)
+                let account = sqlite3_column_text(statement, 1).map { String(cString: $0) }
+                ids.append((UUID(uuid: bytes.loadUnaligned(as: uuid_t.self)).uuidString, account))
             }
             result = sqlite3_step(statement)
         }

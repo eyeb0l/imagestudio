@@ -6,6 +6,8 @@ import SwiftData
 
 /// Told about images added to or deleted from the library on this device.
 protocol LibraryObserver: AnyObject {
+    /// The iCloud account the library syncs with, which deletions made now are owed to.
+    var accountID: String? { get }
     func imagesAdded(_ ids: [UUID])
     func imagesDeleted(_ ids: [UUID])
 }
@@ -100,7 +102,7 @@ nonisolated struct LibrarySyncState: Codable {
 
     /// Forgets everything about an iCloud account's contents, for syncing with a different one.
     /// `remoteDeletions` stays: those images are still to be removed from this library. Pending
-    /// deletions in the store are forgotten by `LibrarySync`.
+    /// deletions in the store stay owed to their own account.
     mutating func forgetServer() {
         engineState = nil
         accountID = nil
@@ -114,34 +116,47 @@ nonisolated struct LibrarySyncState: Codable {
 
 /// Deletions iCloud hasn't been told about, set aside while the library is reset. Otherwise they'd go
 /// into the backup with the old library, and the new library would download those images again.
-/// They're kept with the account they're owed to, and taken on by the next library to sync with that
-/// account (see `LibrarySync.adoptAccount`), so a reset that stops part way keeps them too.
+/// The next library to open takes them on, each still owed to its own account, so a reset that stops
+/// part way keeps them too.
 nonisolated struct UnsentDeletions: Codable, Equatable {
-    /// The iCloud account (user record name) the deletions are owed to. `nil` for a library that
-    /// never synced, whose deletions iCloud has no images for.
-    var accountID: String?
-    var ids: Set<String> = []
+    struct Deletion: Codable, Hashable {
+        /// The image's record name.
+        var id: String
+        /// See `LibraryDeletion.accountID`.
+        var accountID: String?
+    }
+
+    var deletions: Set<Deletion> = []
 
     static let defaultURL = URL.applicationSupportDirectory.appending(path: "Unsent Deletions.json", directoryHint: .notDirectory)
 
-    static func load(from url: URL) -> UnsentDeletions? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(UnsentDeletions.self, from: data)
+    /// `nil` if nothing is set aside. Throws if something is but can't be read.
+    static func load(from url: URL) throws -> UnsentDeletions? {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        }
+        return try JSONDecoder().decode(UnsentDeletions.self, from: data)
     }
 
-    /// Sets aside the pending deletions of the library at `storeURL`, from its store and from its
-    /// sync state at `syncStateURL`, which says which account they're owed to. A sync state left by
-    /// another library says nothing about this one, so then nothing is set aside, as before deletions
-    /// were kept in the store. Throws if they can't be saved.
+    /// Adds the pending deletions of the library at `storeURL` to those already set aside at `url`:
+    /// those in its store, and any its sync state at `syncStateURL` still holds for it. Throws if
+    /// they can't be saved.
     static func setAside(from storeURL: URL, syncStateURL: URL, to url: URL) throws {
-        guard let libraryID = LibraryStore.storeID(at: storeURL) else { return }
-        let state = LibrarySyncState.load(from: syncStateURL)
-        guard state.libraryID == libraryID else { return }
-        var unsent = UnsentDeletions(accountID: state.accountID,
-                                     ids: LibraryStore.pendingDeletions(inStoreAt: storeURL).union(state.pendingDeletions))
-        guard !unsent.ids.isEmpty else { return }
-        // Set aside by a reset that didn't finish: kept if they're owed to the same account.
-        if let earlier = load(from: url), earlier.accountID == unsent.accountID { unsent.ids.formUnion(earlier.ids) }
+        var unsent = UnsentDeletions(deletions: Set(LibraryStore.pendingDeletions(inStoreAt: storeURL).map {
+            Deletion(id: $0.id, accountID: $0.accountID)
+        }))
+        if let libraryID = LibraryStore.storeID(at: storeURL) {
+            let state = LibrarySyncState.load(from: syncStateURL)
+            if state.libraryID == libraryID {
+                unsent.deletions.formUnion(state.pendingDeletions.map { Deletion(id: $0, accountID: state.accountID) })
+            }
+        }
+        guard !unsent.deletions.isEmpty else { return }
+        // Set aside by a reset that didn't finish.
+        if let earlier = try load(from: url) { unsent.deletions.formUnion(earlier.deletions) }
         try JSONEncoder().encode(unsent).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }
@@ -211,7 +226,6 @@ final class LibrarySync: LibraryObserver {
     static let enabledKey = "iCloudSyncEnabled"
     static let signedOutMessage = "Sign in to iCloud in the Settings app to sync your library."
     static let accountChangedNotice = "Your iCloud account changed, so iCloud Sync was turned off rather than copy this library into a different account. Turn it on to sync with the account you're signed in to now."
-    static let accountNotSavedNotice = "iCloud Sync was turned off because Image Studio couldn't save which iCloud account this library syncs with. Turn it on to try again."
 
     private var context: ModelContext { container.mainContext }
     /// For changes to the deletion journal alone, so a failed save is rolled back without touching
@@ -221,6 +235,10 @@ final class LibrarySync: LibraryObserver {
     /// with, so nothing is fetched from or sent to any other account.
     private var accountConfirmed: Bool { engine != nil }
     private var canSend: Bool { engine != nil }
+    var accountID: String? { state.accountID }
+    /// Deletions a reset set aside couldn't be taken on yet, so syncing waits: they could otherwise
+    /// download again.
+    @ObservationIgnored private(set) var hasUntakenDeletions = false
 
     /// `libraryID` identifies the library's store (see `LibraryStore.storeID`). `usesCloudKit: false`
     /// keeps everything local, for unit tests (which host the app).
@@ -239,6 +257,7 @@ final class LibrarySync: LibraryObserver {
         self.isEnabled = defaults.object(forKey: Self.enabledKey) as? Bool ?? true
         studio.libraryObserver = self
         journalStateDeletions()
+        hasUntakenDeletions = !takeUnsentDeletions()
         persist()
         if isEnabled { start() }
     }
@@ -357,9 +376,11 @@ final class LibrarySync: LibraryObserver {
             return
         }
         approvesAccountChange = false
-        guard adoptAccount(userID) else {
-            isEnabled = false
-            notice = Self.accountNotSavedNotice
+        adoptAccount(userID)
+        if hasUntakenDeletions { hasUntakenDeletions = !takeUnsentDeletions() }
+        guard !hasUntakenDeletions else {
+            syncError = "Couldn't read the deletions kept from the library you reset. Image Studio will try again."
+            refreshStatus()
             return
         }
         startEngine()
@@ -367,29 +388,17 @@ final class LibrarySync: LibraryObserver {
         sendOutstandingWork()
     }
 
-    /// Makes `userID` the account this library syncs with, and takes on the deletions a reset set
-    /// aside for it. Deletions are owed to the account the library syncs with, so changing it (from
-    /// another account, or from none) first forgets those still to send, and the change has to reach
-    /// disk: nothing deleted while syncing with one account is ever sent to another. Returns whether
-    /// syncing can go ahead.
-    func adoptAccount(_ userID: String) -> Bool {
-        if state.accountID != userID {
-            if state.accountID != nil { Self.log.notice("Syncing with a different iCloud account, as agreed") }
-            stopEngine()
-            guard forgetPendingDeletions() else { return false }
-            var adopted = state
-            adopted.forgetServer()
-            adopted.accountID = userID
-            do {
-                try adopted.save(to: stateURL)
-            } catch {
-                Self.log.error("Couldn't save the iCloud account: \(error.localizedDescription, privacy: .public)")
-                return false
-            }
-            state = adopted
-        }
-        takeUnsentDeletions(for: userID)
-        return true
+    /// Makes `userID` the account this library syncs with. Deletions still owed to the previous
+    /// account stay owed to it (see `LibraryDeletion.accountID`), and are sent if it comes back.
+    func adoptAccount(_ userID: String) {
+        guard state.accountID != userID else { return }
+        if state.accountID != nil { Self.log.notice("Syncing with a different iCloud account, as agreed") }
+        stopEngine()
+        // Those in the sync state are owed to the previous account too, so they go into the store first.
+        journalStateDeletions()
+        state.forgetServer()
+        state.accountID = userID
+        persist()
     }
 
     // MARK: Local changes
@@ -416,8 +425,8 @@ final class LibrarySync: LibraryObserver {
         journalStateDeletions()
         retryRemoteDeletions()
         queueLocalImages()
-        if let known = withJournal() {
-            queueDeletions(known.pendingDeletions.compactMap(UUID.init(uuidString:)))
+        if let owed = owedDeletions() {
+            queueDeletions(owed.compactMap(UUID.init(uuidString:)))
         }
         retryFailedDownloads()
         refreshStatus()
@@ -438,7 +447,7 @@ final class LibrarySync: LibraryObserver {
         }
         guard let known = withJournal() else { return }
         let missing = known.deletedLocally(library: library).subtracting(known.pendingDeletions)
-        journal(missing.compactMap(UUID.init(uuidString:)), as: .pending)
+        journal(missing.compactMap(UUID.init(uuidString:)), as: .pending, owedTo: state.accountID)
         queueUploads(known.toUpload(library))
     }
 
@@ -484,16 +493,31 @@ final class LibrarySync: LibraryObserver {
         }
     }
 
-    private var hasUnfinishedDeletions: Bool {
-        guard state.pendingDeletions.isEmpty, state.remoteDeletions.isEmpty else { return true }
-        return ((try? journalContext.fetchCount(FetchDescriptor<LibraryDeletion>())) ?? 1) > 0
+    /// The deletions to send to the account this library syncs with: only those owed to it. Those
+    /// in the sync state are owed to it too. `nil` if the store can't be read.
+    private func owedDeletions() -> Set<String>? {
+        guard let accountID = state.accountID else { return [] }
+        do {
+            return try LibraryDeletion.all(in: journalContext).owed[accountID, default: []].union(state.pendingDeletions)
+        } catch {
+            Self.log.error("Couldn't read recorded deletions: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
-    /// Records deletions in the store, or in the sync state if the store can't be saved.
-    private func journal(_ ids: [UUID], as kind: LibraryDeletion.Kind) {
+    private var hasUnfinishedDeletions: Bool {
+        guard state.remoteDeletions.isEmpty, let owed = owedDeletions(), owed.isEmpty,
+              let journal = try? LibraryDeletion.all(in: journalContext) else { return true }
+        return !journal.remote.isEmpty
+    }
+
+    /// Records deletions in the store, or in the sync state if the store can't be saved. Pending
+    /// ones are owed to `accountID`, which has to be the one this library syncs with to fall back
+    /// to the sync state.
+    private func journal(_ ids: [UUID], as kind: LibraryDeletion.Kind, owedTo accountID: String? = nil) {
         guard !ids.isEmpty else { return }
         do {
-            try LibraryDeletion.record(ids, as: kind, in: journalContext)
+            try LibraryDeletion.record(ids, as: kind, owedTo: accountID, in: journalContext)
             try journalContext.save()
         } catch {
             journalContext.rollback()
@@ -523,19 +547,18 @@ final class LibrarySync: LibraryObserver {
         }
     }
 
-    /// Forgets every deletion still to send, when iCloud's contents are forgotten. Returns whether it
-    /// did.
-    @discardableResult
-    private func forgetPendingDeletions() -> Bool {
+    /// Forgets the deletions still to send to the account this library syncs with, when iCloud's
+    /// copy of its library is gone.
+    private func forgetOwedDeletions() {
         state.pendingDeletions = []
+        guard let accountID = state.accountID else { return }
         do {
-            try LibraryDeletion.forgetAll(.pending, in: journalContext)
+            try LibraryDeletion.forgetPending(owedTo: accountID, in: journalContext)
             try journalContext.save()
-            return true
         } catch {
+            // Only costs deletions sent for images that aren't there.
             journalContext.rollback()
             Self.log.error("Couldn't forget pending deletions: \(error.localizedDescription, privacy: .public)")
-            return false
         }
     }
 
@@ -545,7 +568,8 @@ final class LibrarySync: LibraryObserver {
     private func journalStateDeletions() -> Bool {
         guard !state.pendingDeletions.isEmpty || !state.remoteDeletions.isEmpty else { return true }
         do {
-            try LibraryDeletion.record(state.pendingDeletions.compactMap(UUID.init(uuidString:)), as: .pending, in: journalContext)
+            try LibraryDeletion.record(state.pendingDeletions.compactMap(UUID.init(uuidString:)), as: .pending,
+                                       owedTo: state.accountID, in: journalContext)
             try LibraryDeletion.record(state.remoteDeletions.compactMap(UUID.init(uuidString:)), as: .remote, in: journalContext)
             try journalContext.save()
         } catch {
@@ -560,16 +584,22 @@ final class LibrarySync: LibraryObserver {
         return true
     }
 
-    /// Takes on the deletions a library reset set aside for `userID` (see `UnsentDeletions`). Any owed
-    /// to another account are dropped. The file goes once they're recorded here, in the store or else
-    /// the sync state.
-    private func takeUnsentDeletions(for userID: String) {
-        guard let unsent = UnsentDeletions.load(from: unsentDeletionsURL) else { return }
-        if unsent.accountID == userID {
-            state.pendingDeletions.formUnion(unsent.ids)
-            guard journalStateDeletions() || persist() else { return }
-        } else {
-            Self.log.notice("Dropped deletions set aside for another iCloud account")
+    /// Takes on the deletions a library reset set aside (see `UnsentDeletions`), each owed to its own
+    /// account. The file goes once they're in the store. Returns whether there are none left to take.
+    private func takeUnsentDeletions() -> Bool {
+        let unsent: UnsentDeletions
+        do {
+            guard let found = try UnsentDeletions.load(from: unsentDeletionsURL) else { return true }
+            unsent = found
+            for (accountID, deletions) in Dictionary(grouping: unsent.deletions, by: \.accountID) {
+                try LibraryDeletion.record(deletions.compactMap { UUID(uuidString: $0.id) }, as: .pending,
+                                           owedTo: accountID, in: journalContext)
+            }
+            try journalContext.save()
+        } catch {
+            journalContext.rollback()
+            Self.log.error("Couldn't take on unsent deletions: \(error.localizedDescription, privacy: .public)")
+            return false
         }
         do {
             try FileManager.default.removeItem(at: unsentDeletionsURL)
@@ -577,6 +607,7 @@ final class LibrarySync: LibraryObserver {
             // Taken on again next time, which changes nothing.
             Self.log.error("Couldn't remove unsent deletions: \(error.localizedDescription, privacy: .public)")
         }
+        return true
     }
 
     // MARK: Engine events
@@ -684,14 +715,14 @@ final class LibrarySync: LibraryObserver {
             Self.log.notice("iCloud's encrypted data was reset; uploading the library again")
             state.zoneCreated = false
             state.uploaded = []
-            forgetPendingDeletions()
+            forgetOwedDeletions()
             persist()
             queueLocalImages()
         default:
             // Deleted in Settings (Manage Storage). Uploading again would undo that, so stop instead.
             Self.log.notice("The iCloud zone was deleted; turning sync off")
+            forgetOwedDeletions()
             state.forgetServer()
-            forgetPendingDeletions()
             persist()
             isEnabled = false
             notice = "iCloud Sync was turned off because Image Studio's data was deleted from iCloud. Your library on this device hasn't changed."
@@ -858,6 +889,8 @@ final class LibrarySync: LibraryObserver {
     var persistedState: LibrarySyncState { state }
     /// For tests: that, with the deletions recorded in the store.
     var knownDeletions: LibrarySyncState? { withJournal() }
+    /// For tests: the deletions that would be sent to the account this library syncs with.
+    var deletionsToSend: Set<String>? { owedDeletions() }
     #endif
 }
 
