@@ -1,4 +1,5 @@
 import CoreData
+import OSLog
 import SQLite3
 import SwiftData
 import SwiftUI
@@ -106,8 +107,13 @@ final class AppModel {
     func resetLibrary(date: Date = .now) {
         // Deletions iCloud hasn't been told about go with the old library, and the new one would
         // download those images again. They're set aside first, so the reset can stop at any point
-        // and still keep them; the next library to open records them as its own (`LibrarySync`).
-        UnsentDeletions.setAside(from: storeURL, syncStateURL: syncStateURL, to: unsentDeletionsURL)
+        // and still keep them; the next library to sync with their account takes them on.
+        do {
+            try UnsentDeletions.setAside(from: storeURL, syncStateURL: syncStateURL, to: unsentDeletionsURL)
+        } catch {
+            resetFailure = "Images you deleted that iCloud doesn't know about yet couldn't be set aside, so nothing was changed. \(error.localizedDescription)"
+            return
+        }
         do {
             // Sync state describes the old library (what it has from iCloud), so it goes with it. If it's
             // left behind, it still can't be used with the new library: see `LibrarySync`'s library ID.
@@ -176,6 +182,8 @@ final class AppModel {
 // MARK: - Store
 
 enum LibraryStore {
+    private nonisolated static let log = Logger(subsystem: "com.eyeb0l.ImageStudio", category: "LibraryStore")
+
     #if DEBUG
     struct SimulatedFailure: LocalizedError {
         var errorDescription: String? { "Simulated failure (-SimulateLibraryOpenFailure)." }
@@ -210,23 +218,35 @@ enum LibraryStore {
     }
 
     /// The deletions recorded as `LibraryDeletion.Kind.pending` in the store at `url`, read straight
-    /// from its SQLite file, as it's usually a library that can't be opened. Empty if it can't be
-    /// read, or is from before deletions were kept in the store.
+    /// from its SQLite file, as it's usually a library that can't be opened. Empty for a store from
+    /// before deletions were kept in it. A damaged store gives what could be read, maybe nothing:
+    /// it's still reset, as otherwise it never could be, and those images download again.
     nonisolated static func pendingDeletions(inStoreAt url: URL) -> Set<String> {
         var database: OpaquePointer?
         defer { sqlite3_close(database) }
-        guard sqlite3_open_v2(url.path(percentEncoded: false), &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        func fail(_ step: String) -> Set<String> {
+            log.error("Couldn't \(step, privacy: .public) the library's deletions: \(String(cString: sqlite3_errmsg(database)), privacy: .public)")
+            return []
+        }
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [] }
+        guard sqlite3_open_v2(url.path(percentEncoded: false), &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return fail("open") }
         // Core Data's names for the `LibraryDeletion` entity and its attributes; UUIDs are 16-byte blobs.
         let query = "SELECT ZIMAGEID FROM ZLIBRARYDELETION WHERE ZKIND = '\(LibraryDeletion.Kind.pending.rawValue)'"
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return [] }
-        var ids: Set<String> = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard sqlite3_column_bytes(statement, 0) == MemoryLayout<uuid_t>.size,
-                  let bytes = sqlite3_column_blob(statement, 0) else { continue }
-            ids.insert(UUID(uuid: bytes.loadUnaligned(as: uuid_t.self)).uuidString)
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else {
+            // An older store has no such table.
+            return String(cString: sqlite3_errmsg(database)).hasPrefix("no such table") ? [] : fail("read")
         }
+        var ids: Set<String> = []
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if sqlite3_column_bytes(statement, 0) == MemoryLayout<uuid_t>.size, let bytes = sqlite3_column_blob(statement, 0) {
+                ids.insert(UUID(uuid: bytes.loadUnaligned(as: uuid_t.self)).uuidString)
+            }
+            result = sqlite3_step(statement)
+        }
+        if result != SQLITE_DONE { _ = fail("finish reading") }
         return ids
     }
 

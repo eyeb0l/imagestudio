@@ -616,12 +616,13 @@ final class Studio {
         }
         let forget: (ModelContext) throws -> Void = { try LibraryDeletion.forget(ids, in: $0) }
         guard !images.isEmpty else {
+            // In a context of its own, so a failure leaves anything waiting in the main one alone.
+            let journal = ModelContext(container)
             do {
-                try forget(context)
-                try context.save()
+                try forget(journal)
+                try journal.save()
             } catch {
                 // Only costs a deletion sent again, or a removal tried again, that finds nothing.
-                context.rollback()
                 Self.log.error("Couldn't forget synced deletions: \(error.localizedDescription, privacy: .public)")
             }
             return []
