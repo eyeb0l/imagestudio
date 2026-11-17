@@ -7,7 +7,7 @@ import Testing
 // MARK: - Helpers
 
 private func makeContainer() throws -> ModelContainer {
-    try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+    try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                        configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
 }
 
@@ -496,27 +496,31 @@ struct LibrarySyncStateTests {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appending(path: "Library Sync.json")
-        let (uploaded, inFlight) = (UUID(), UUID())
+        let uploaded = try syncedImage(in: directory)
+        let inFlight = try syncedImage(in: directory)
+        defer { for image in [uploaded, inFlight] { try? ImageStore.delete(fileName: image.fileName) } }
         var state = LibrarySyncState()
-        state.uploaded = [uploaded.uuidString]
+        state.uploaded = [uploaded.id.uuidString]
         // A download being retried for it mustn't bring it back.
-        state.failedDownloads = [inFlight.uuidString]
+        state.failedDownloads = [inFlight.id.uuidString]
         try state.save(to: url)
         let defaults = try #require(UserDefaults(suiteName: "LibrarySyncTests-\(UUID().uuidString)"))
         defaults.set(false, forKey: LibrarySync.enabledKey)
 
         let container = try makeContainer()
-        let sync = LibrarySync(studio: makeStudio(container: container), container: container, defaults: defaults,
-                               stateURL: url, usesCloudKit: false)
+        let studio = makeStudio(container: container)
+        let sync = LibrarySync(studio: studio, container: container, defaults: defaults,
+                               stateURL: url, unsentDeletionsURL: directory.appending(path: "Unsent.json"), usesCloudKit: false)
         #expect(!sync.isEnabled && sync.status == .off)
+        _ = studio.addSyncedImages([uploaded, inFlight])
 
         // `inFlight` may have reached iCloud without this device hearing back, so it's kept too.
-        sync.imagesDeleted([uploaded, inFlight])
+        studio.delete(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()))
 
-        let saved = LibrarySyncState.load(from: url)
-        #expect(saved.pendingDeletions == [uploaded.uuidString, inFlight.uuidString])
-        #expect(saved.failedDownloads.isEmpty)
-        #expect(saved.toUpload([uploaded, inFlight]).isEmpty)
+        #expect(LibrarySyncState.load(from: url).failedDownloads.isEmpty)
+        let known = try #require(sync.knownDeletions)
+        #expect(known.pendingDeletions == [uploaded.id.uuidString, inFlight.id.uuidString])
+        #expect(known.toUpload([uploaded.id, inFlight.id]).isEmpty)
     }
 
     @Test func infersDeletionsThatWereNeverRecorded() {
@@ -604,5 +608,231 @@ struct LibrarySyncStateTests {
                                                      companions: [syncState])
         #expect(!exists(syncState))
         #expect(exists(try #require(backup).appending(path: "Library Sync.json")))
+    }
+}
+
+// MARK: - Deletion journal
+
+/// Made by `main` (before deletions were kept in the store), with its own code: a library holding
+/// `remote` and `kept`, and a failed job. Its sync state records `pending` as deleted here and not
+/// yet confirmed by iCloud, and `remote` as deleted in iCloud but not removed here yet.
+private enum MainFixture {
+    static let pending = UUID(uuidString: "AAAAAAAA-0000-4000-8000-000000000001")!
+    static let remote = UUID(uuidString: "BBBBBBBB-0000-4000-8000-000000000002")!
+    static let kept = UUID(uuidString: "CCCCCCCC-0000-4000-8000-000000000003")!
+    static let job = UUID(uuidString: "DDDDDDDD-0000-4000-8000-000000000004")!
+    static let libraryID = "69E99357-12F8-4289-B7E4-944E63F676AF"
+
+    private final class BundleToken {}
+
+    /// Copies the library, and with `syncState` its sync state, to where the app keeps them.
+    static func install(in directory: URL, syncState: Bool) throws -> (store: URL, syncState: URL) {
+        let bundle = Bundle(for: BundleToken.self)
+        let store = directory.appending(path: "default.store")
+        let state = directory.appending(path: "Library Sync.json")
+        try FileManager.default.copyItem(at: try #require(bundle.url(forResource: "MainLibrary", withExtension: "store")), to: store)
+        if syncState {
+            try FileManager.default.copyItem(at: try #require(bundle.url(forResource: "MainLibrary Sync", withExtension: "json")), to: state)
+        }
+        return (store, state)
+    }
+}
+
+@Suite("Deletion journal", .serialized)
+@MainActor
+struct DeletionJournalTests {
+    private struct Stopped: Error {}
+
+    private func offDefaults() throws -> UserDefaults {
+        let defaults = try #require(UserDefaults(suiteName: "LibrarySyncTests-\(UUID().uuidString)"))
+        defaults.set(false, forKey: LibrarySync.enabledKey)
+        return defaults
+    }
+
+    @Test func aLibraryFromMainOpensAndMigrates() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (store, _) = try MainFixture.install(in: directory, syncState: false)
+
+        do {
+            let container = try LibraryStore.open(at: store)
+            #expect(container.configurations.allSatisfy { $0.cloudKitContainerIdentifier == nil })
+            let images = try container.mainContext.fetch(FetchDescriptor<GeneratedImage>(sortBy: [SortDescriptor(\.createdAt)]))
+            #expect(images.map(\.id) == [MainFixture.remote, MainFixture.kept])
+            #expect(images.map(\.prompt) == ["Main fixture 1", "Main fixture 2"])
+            #expect(images.last?.referenceFileNames == ["ref.jpg"])
+            let job = try #require(try container.mainContext.fetch(FetchDescriptor<PendingGeneration>()).first)
+            #expect(job.id == MainFixture.job && job.failureMessage == "Failed")
+            #expect(try container.mainContext.fetchCount(FetchDescriptor<LibraryDeletion>()) == 0)
+            #expect(LibraryStore.storeID(at: store) == MainFixture.libraryID, "Still the same library.")
+
+            // The migrated library records deletions.
+            let kept = try #require(images.last)
+            makeStudio(container: container).delete([kept])
+        }
+
+        let reopened = try LibraryStore.open(at: store)
+        #expect(try LibraryDeletion.all(in: reopened.mainContext).pending == [MainFixture.kept.uuidString])
+        #expect(try reopened.mainContext.fetch(FetchDescriptor<GeneratedImage>()).map(\.id) == [MainFixture.remote])
+        // What a reset reads from a library that won't open.
+        #expect(LibraryStore.pendingDeletions(inStoreAt: store) == [MainFixture.kept.uuidString])
+        #expect(LibraryStore.pendingDeletions(inStoreAt: directory.appending(path: "missing.store")).isEmpty)
+        let damaged = directory.appending(path: "damaged.store")
+        try Data("not a database".utf8).write(to: damaged)
+        #expect(LibraryStore.pendingDeletions(inStoreAt: damaged).isEmpty)
+    }
+
+    @Test func movesTheSyncStatesDeletionsIntoTheStore() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (store, syncState) = try MainFixture.install(in: directory, syncState: true)
+        let container = try LibraryStore.open(at: store)
+
+        let sync = LibrarySync(studio: makeStudio(container: container), container: container, defaults: try offDefaults(),
+                               stateURL: syncState, unsentDeletionsURL: directory.appending(path: "Unsent Deletions.json"),
+                               libraryID: LibraryStore.storeID(at: store), usesCloudKit: false)
+
+        let journal = try LibraryDeletion.all(in: container.mainContext)
+        #expect(journal.pending == [MainFixture.pending.uuidString])
+        #expect(journal.remote == [MainFixture.remote.uuidString])
+        let saved = LibrarySyncState.load(from: syncState)
+        #expect(saved.pendingDeletions.isEmpty && saved.remoteDeletions.isEmpty, "Moved, not copied.")
+        #expect(saved.libraryID == MainFixture.libraryID, "The rest stays.")
+        #expect(saved.uploaded == Set([MainFixture.pending, MainFixture.remote, MainFixture.kept].map(\.uuidString)))
+
+        let known = try #require(sync.knownDeletions)
+        #expect(!known.accepts(MainFixture.pending) && !known.accepts(MainFixture.remote) && known.accepts(MainFixture.kept))
+        #expect(known.toUpload([MainFixture.remote, MainFixture.kept]).isEmpty)
+        #expect(known.deletedLocally(library: [MainFixture.remote, MainFixture.kept]) == [MainFixture.pending.uuidString])
+    }
+
+    /// The sync state can't be written from just before a retried download succeeds until after the
+    /// image is deleted. The state file still says the download is to be retried, and nothing about
+    /// the deletion, so with the deletion kept only there the image would come back.
+    @Test func aDeletionSurvivesASyncStateThatCantBeWritten() throws {
+        let directory = try temporaryDirectory()
+        let stateFolder = directory.appending(path: "State", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: stateFolder, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stateFolder.path(percentEncoded: false))
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = directory.appending(path: "default.store")
+        let syncState = stateFolder.appending(path: "Library Sync.json")
+        let unsent = directory.appending(path: "Unsent Deletions.json")
+        let defaults = try offDefaults()
+        let image = try syncedImage(in: directory)
+        defer { try? ImageStore.delete(fileName: image.fileName) }
+
+        do {
+            let container = try LibraryStore.open(at: store)
+            let libraryID = try #require(LibraryStore.storeID(at: store))
+            var state = LibrarySyncState()
+            state.libraryID = libraryID
+            state.failedDownloads = [image.id.uuidString]
+            try state.save(to: syncState)
+            let studio = makeStudio(container: container)
+            let sync = LibrarySync(studio: studio, container: container, defaults: defaults, stateURL: syncState,
+                                   unsentDeletionsURL: unsent, libraryID: libraryID, usesCloudKit: false)
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: stateFolder.path(percentEncoded: false))
+            #expect(studio.addSyncedImages([image]).present == [image.id], "The retried download succeeds.")
+            studio.delete(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()))
+            #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 0)
+            _ = sync
+        }
+        let onDisk = LibrarySyncState.load(from: syncState)
+        #expect(onDisk.failedDownloads == [image.id.uuidString] && onDisk.pendingDeletions.isEmpty,
+                "Nothing reached the sync state.")
+
+        // Next launch.
+        let container = try LibraryStore.open(at: store)
+        let sync = LibrarySync(studio: makeStudio(container: container), container: container, defaults: defaults,
+                               stateURL: syncState, unsentDeletionsURL: unsent, libraryID: LibraryStore.storeID(at: store),
+                               usesCloudKit: false)
+        let known = try #require(sync.knownDeletions)
+        #expect(known.pendingDeletions == [image.id.uuidString], "Still to be deleted from iCloud.")
+        #expect(!known.accepts(image.id), "The download retried for it can't bring it back.")
+    }
+
+    @Test(arguments: [false, true])
+    func pendingDeletionsSurviveAReset(interrupted: Bool) throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = directory.appending(path: "default.store")
+        let syncState = directory.appending(path: "Library Sync.json")
+        let unsent = directory.appending(path: "Unsent Deletions.json")
+        let backups = directory.appending(path: "Library Backups")
+        let (deleted, kept) = (try syncedImage(in: directory), try syncedImage(in: directory))
+        defer { for image in [deleted, kept] { try? ImageStore.delete(fileName: image.fileName) } }
+
+        let oldID: String
+        do {
+            let container = try LibraryStore.open(at: store)
+            oldID = try #require(LibraryStore.storeID(at: store))
+            let studio = makeStudio(container: container)
+            let sync = LibrarySync(studio: studio, container: container, defaults: try offDefaults(), stateURL: syncState,
+                                   unsentDeletionsURL: unsent, libraryID: oldID, usesCloudKit: false)
+            _ = studio.addSyncedImages([deleted, kept])
+            let record = try #require(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()).first { $0.id == deleted.id })
+            studio.delete([record])  // Not sent: syncing is off.
+            _ = sync
+        }
+
+        // The library won't open, so it's reset. If `interrupted`, the app stops before the new library
+        // is set up, and it's opened at the next launch.
+        let model = AppModel(simulatesFailure: true, storeURL: store, backupsDirectory: backups, syncStateURL: syncState,
+                             unsentDeletionsURL: unsent) {
+            if interrupted { throw Stopped() }
+            return try LibraryStore.open(at: store)
+        }
+        model.resetLibrary()
+        let launched = interrupted
+            ? AppModel(simulatesFailure: false, storeURL: store, backupsDirectory: backups, syncStateURL: syncState,
+                       unsentDeletionsURL: unsent) { try LibraryStore.open(at: store) }
+            : model
+
+        guard case .ready(let services) = launched.state else {
+            Issue.record("The new library didn't open: \(launched.openFailure ?? "")")
+            return
+        }
+        #expect(LibraryStore.storeID(at: store) != oldID, "A new library.")
+        #expect(try LibraryDeletion.all(in: services.container.mainContext).pending == [deleted.id.uuidString])
+        let known = try #require(services.sync.knownDeletions)
+        #expect(!known.accepts(deleted.id), "Its download from iCloud is refused.")
+        #expect(known.accepts(kept.id), "Everything else downloads again.")
+        #expect(!exists(unsent), "Taken on by the new library.")
+    }
+
+    @Test func recordsDeletionsWithTheLibraryChange() throws {
+        let container = try makeContainer()
+        let studio = makeStudio(container: container)
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let images = try (0..<4).map { _ in try syncedImage(in: directory) }
+        defer { for image in images { try? ImageStore.delete(fileName: image.fileName) } }
+        _ = studio.addSyncedImages(images)
+        let context = container.mainContext
+
+        let first = try #require(try context.fetch(FetchDescriptor<GeneratedImage>()).first { $0.id == images[0].id })
+        studio.delete([first])
+        #expect(try LibraryDeletion.all(in: context).pending == [images[0].id.uuidString])
+
+        // Deleted in iCloud: removed with its recorded deletion, and one already gone here is forgotten.
+        try LibraryDeletion.record([images[1].id], as: .remote, in: context)
+        try context.save()
+        #expect(studio.removeSyncedImages(ids: [images[0].id, images[1].id]).isEmpty)
+        #expect(try context.fetchCount(FetchDescriptor<LibraryDeletion>()) == 0)
+
+        let folder = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        studio.deleteAll { try ImageStore.deleteAll(in: folder) }
+        #expect(try LibraryDeletion.all(in: context).pending == Set(images[2...].map(\.id.uuidString)))
+
+        // An image deleted in iCloud stays recorded as that.
+        try LibraryDeletion.record([images[2].id], as: .remote, in: context)
+        try LibraryDeletion.record([images[2].id], as: .pending, in: context)
+        try context.save()
+        #expect(try LibraryDeletion.all(in: context).remote == [images[2].id.uuidString])
     }
 }

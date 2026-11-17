@@ -1,4 +1,5 @@
 import CoreData
+import SQLite3
 import SwiftData
 import SwiftUI
 import UIKit
@@ -72,6 +73,7 @@ final class AppModel {
     @ObservationIgnored private let storeURL: URL
     @ObservationIgnored private let backupsDirectory: URL
     @ObservationIgnored private let syncStateURL: URL
+    @ObservationIgnored private let unsentDeletionsURL: URL
     @ObservationIgnored private let rasterCache: SVGRasterCache
     @ObservationIgnored private var simulatesFailure: Bool
 
@@ -79,12 +81,14 @@ final class AppModel {
          storeURL: URL = LibraryStore.defaultStoreURL,
          backupsDirectory: URL = LibraryStore.backupsDirectory,
          syncStateURL: URL = LibrarySyncState.defaultURL,
+         unsentDeletionsURL: URL = UnsentDeletions.defaultURL,
          rasterCache: SVGRasterCache = .shared,
          opener: @escaping @MainActor () throws -> ModelContainer = LibraryStore.open) {
         self.simulatesFailure = simulatesFailure
         self.storeURL = storeURL
         self.backupsDirectory = backupsDirectory
         self.syncStateURL = syncStateURL
+        self.unsentDeletionsURL = unsentDeletionsURL
         self.rasterCache = rasterCache
         self.opener = opener
         tryOpen()
@@ -100,6 +104,10 @@ final class AppModel {
     /// deleting them), then opens a fresh library. Image files are left where they are. With iCloud
     /// Sync on, the fresh library downloads everything in iCloud again.
     func resetLibrary(date: Date = .now) {
+        // Deletions iCloud hasn't been told about go with the old library, and the new one would
+        // download those images again. They're set aside first, so the reset can stop at any point
+        // and still keep them; the next library to open records them as its own (`LibrarySync`).
+        UnsentDeletions.setAside(from: storeURL, syncStateURL: syncStateURL, to: unsentDeletionsURL)
         do {
             // Sync state describes the old library (what it has from iCloud), so it goes with it. If it's
             // left behind, it still can't be used with the new library: see `LibrarySync`'s library ID.
@@ -145,6 +153,7 @@ final class AppModel {
         return Services(container: container, apiKeys: apiKeys, preferences: Preferences(),
                         composer: Composer(), studio: studio, updates: updates,
                         sync: LibrarySync(studio: studio, container: container, stateURL: syncStateURL,
+                                          unsentDeletionsURL: unsentDeletionsURL,
                                           libraryID: LibraryStore.storeID(at: storeURL)))
     }
 
@@ -176,7 +185,9 @@ enum LibraryStore {
     /// `cloudKitDatabase: .none` matters: with an iCloud container in the entitlements, SwiftData
     /// would otherwise mirror the store to CloudKit itself, which this schema doesn't allow (unique
     /// IDs, attributes without defaults), so the library wouldn't open. `LibrarySync` syncs instead.
-    private static let schema = Schema([GeneratedImage.self, PendingGeneration.self])
+    /// There's no versioned schema: changes so far (new optional or defaulted attributes, and the
+    /// `LibraryDeletion` entity) are ones SwiftData migrates by itself.
+    static let schema = Schema([GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self])
 
     private static var configuration: ModelConfiguration {
         ModelConfiguration(schema: schema, cloudKitDatabase: .none)
@@ -196,6 +207,27 @@ enum LibraryStore {
     nonisolated static func storeID(at url: URL) -> String? {
         let metadata = try? NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
         return metadata?[NSStoreUUIDKey] as? String
+    }
+
+    /// The deletions recorded as `LibraryDeletion.Kind.pending` in the store at `url`, read straight
+    /// from its SQLite file, as it's usually a library that can't be opened. Empty if it can't be
+    /// read, or is from before deletions were kept in the store.
+    nonisolated static func pendingDeletions(inStoreAt url: URL) -> Set<String> {
+        var database: OpaquePointer?
+        defer { sqlite3_close(database) }
+        guard sqlite3_open_v2(url.path(percentEncoded: false), &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        // Core Data's names for the `LibraryDeletion` entity and its attributes; UUIDs are 16-byte blobs.
+        let query = "SELECT ZIMAGEID FROM ZLIBRARYDELETION WHERE ZKIND = '\(LibraryDeletion.Kind.pending.rawValue)'"
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return [] }
+        var ids: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard sqlite3_column_bytes(statement, 0) == MemoryLayout<uuid_t>.size,
+                  let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            ids.insert(UUID(uuid: bytes.loadUnaligned(as: uuid_t.self)).uuidString)
+        }
+        return ids
     }
 
     /// Where SwiftData keeps the library by default (`default.store` in Application Support).

@@ -84,7 +84,7 @@ private struct MarkedFiles {
 private func filesExist(_ names: [String]) -> [Bool] { names.map(ReferenceStore.fileExists) }
 
 private func makeContainer() throws -> ModelContainer {
-    try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+    try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                        configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
 }
 
