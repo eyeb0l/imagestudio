@@ -143,11 +143,18 @@ private struct ImageDetailPage: View {
     var onOpenFullscreen: (FullscreenItem) -> Void
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var pageSize: CGSize = .zero
+
+    /// An iPad-sized window. Not a phone: a landscape phone can be wider than 700 points, and the
+    /// larger ones are regular width too, but every phone is compact height in landscape.
+    private var isRegular: Bool {
+        horizontalSizeClass == .regular && verticalSizeClass == .regular
+    }
 
     /// Wide enough, and wider than tall, to show the image beside its details rather than above them.
     private var showsSideBySide: Bool {
-        pageSize.width >= 700 && pageSize.width > pageSize.height
+        isRegular && pageSize.width >= 700 && pageSize.width > pageSize.height
     }
 
     var body: some View {
@@ -177,10 +184,9 @@ private struct ImageDetailPage: View {
 
     /// Image above details: a phone, a narrow window, or an iPad held upright.
     private var stacked: some View {
-        // In a regular width the image can take more of the height, and lines of text are kept to
-        // a readable length. A phone keeps its fixed sizes.
-        let isRegular = horizontalSizeClass == .regular
-        return ScrollView {
+        // On an iPad the image can take more of the height, and lines of text are kept to a readable
+        // length. A phone keeps its fixed sizes.
+        ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 picture
                     .frame(maxWidth: .infinity, maxHeight: isRegular ? max(460, pageSize.height * 0.6) : 460)

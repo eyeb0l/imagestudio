@@ -8,6 +8,7 @@ struct LibraryView: View {
     @Environment(APIKeyStore.self) private var apiKeys
     @Environment(GenerationNotifier.self) private var notifier
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     @Query(sort: \GeneratedImage.createdAt, animation: .snappy) private var images: [GeneratedImage]
 
@@ -24,9 +25,10 @@ struct LibraryView: View {
     @FocusState private var composerFocused: Bool
     @Namespace private var zoomNamespace
 
-    /// Larger tiles when there's room for them, as in Photos on iPad.
+    /// Larger tiles in an iPad-sized window, as in Photos on iPad. Not on a landscape phone, which
+    /// can be regular width but is compact height.
     private var columns: [GridItem] {
-        horizontalSizeClass == .regular
+        horizontalSizeClass == .regular && verticalSizeClass == .regular
             ? [GridItem(.adaptive(minimum: 150, maximum: 260), spacing: 2)]
             : [GridItem(.adaptive(minimum: 100, maximum: 200), spacing: 2)]
     }
