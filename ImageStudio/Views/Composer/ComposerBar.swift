@@ -54,6 +54,9 @@ struct ComposerBar: View {
         // Not interactive: that glass takes touches on its area even through an open menu, so a
         // row of a chip's menu lying over the prompt box wouldn't select.
         .glassEffect(.regular, in: .rect(cornerRadius: 26))
+        // Full width on a phone; on a wider window, a box of a comfortable width in the middle.
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
         .padding(.bottom, 4)
         .sheet(isPresented: $showingOptions) { ComposerOptionsSheet() }
@@ -186,6 +189,8 @@ struct ComposerBar: View {
         }
         .buttonStyle(.plain)
         .disabled(isEmpty)
+        // Return adds a line to the prompt, so a hardware keyboard sends with Command-Return.
+        .keyboardShortcut(.return, modifiers: .command)
         .animation(.snappy, value: isEmpty)
         .accessibilityLabel("Generate")
     }

@@ -2,7 +2,7 @@
 
 # Image Studio
 
-A minimal, personal iOS app for generating images with the OpenAI Image API.
+A minimal, personal iPhone and iPad app for generating images with the OpenAI Image API.
 
 - **Prompt box** pinned to the bottom of the library, showing the active model, size, quality and image count. Tap any chip to change it for the next generation, or open the options sheet for everything else (complexity on GPT Image 2.6, background, format, compression, moderation, frames and frame duration for GIFs).
 - **SVG output:** on GPT Image 2.6, choose **SVG** as the format to get an editable vector, such as an icon or a logo. A request makes one image, so the image count locks to 1 and says why. Quality and complexity apply to the reference image OpenAI creates first; a second model, the **SVG Author** you choose in the options sheet (GPT-6.1 Terra by default), then writes the SVG. It is billed separately at its own rates, and the details list its tokens apart from the image's. Library tiles show an SVG badge, and the detail view lists its shape rather than a resolution. Zooming in full screen renders more detail, so it stays sharp. Anything an SVG leaves unpainted shows a light checkerboard, in dark mode too, so black or white artwork stays visible. Export and Copy keep the original file (Copy also offers it as text). An SVG can't be used as a reference. A notification for one that finishes in the background has no thumbnail, unless it's already been shown.
@@ -13,13 +13,14 @@ A minimal, personal iOS app for generating images with the OpenAI Image API.
 - **Library** grid in the style of Photos. Long-press an image to export, copy, regenerate, reuse its prompt, select or delete it. Use **Select** to export, regenerate or delete several images at once.
 - **Detail view** with the image, prompt and generation details (model, size, quality, complexity, frames for GIFs, format, timing, tokens), plus export, regenerate and delete. Images made from references list them, and you can tap a reference to view it. Swipe between images; tap an image to view it full screen with pinch-to-zoom.
 - **Live Activity and notifications:** while generations run, a Live Activity on the Lock Screen and in the Dynamic Island shows how many images are on the way, the latest prompt and the elapsed time. When the last one finishes it shows a summary (e.g. "3 images ready, 1 failed") for 15 minutes, or closes at once if Image Studio is open. A generation that finishes or fails while the app isn't open also posts a notification with a thumbnail; tap it to open the image. Image Studio asks for notification permission the first time you generate. Both can be turned off in the Settings app.
+- **iPad:** the layout follows the window, so it works full screen, in Split View, Slide Over and Stage Manager, and adjusts as the window is resized or the iPad is rotated. In an iPad-sized window the library uses larger tiles, and in a wide one the detail view puts the image beside its details. The prompt box keeps a readable width on any wide screen. With a hardware keyboard, Command-Return generates, Command-Comma opens Settings and Escape closes the full-screen viewer. Image Studio uses a single window, as every window would share the same prompt box, references and markup canvas.
 - **Secure API key**: stored in the iOS Keychain (`AfterFirstUnlockThisDeviceOnly`, so background generations can read it while the phone is locked), never synced or backed up, and checked against OpenAI when you save it. Keys saved by earlier versions are migrated automatically. If the Keychain can't be read, Settings says so and offers to retry instead of acting as if no key were saved.
 - **Resilient to a damaged library**: if the library database can't be opened, the app shows a recovery screen instead of crashing. **Try Again** retries; **Reset Library** moves the store files (never deletes them) to `Application Support/Library Backups/<timestamp>/` and starts a fresh library. Image files in `Application Support/Images` are untouched. Missing or undecodable image files, including SVGs that are malformed or that take too long to draw, show an "image unavailable" placeholder. Export and Copy are disabled if the file is missing, but stay available for a file that can't be drawn, so you can still get it out and look at it.
 
 ## Requirements
 
 - Xcode 26 or later (built with Xcode 27.2)
-- iOS 26 or later
+- iOS or iPadOS 26 or later
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - An OpenAI API key from a [verified organization](https://platform.openai.com/settings/organization/general) (required for GPT Image models)
 
@@ -84,4 +85,5 @@ Original image files are stored in `Application Support/Images`, and metadata is
 - **Background generation:** requests run on a background `URLSession` (`GenerationSession`), so they continue while the app is suspended or after the system terminates it. Pending and failed jobs are stored as `PendingGeneration` records. Force-quitting the app cancels in-flight requests; those jobs show as failed with Retry.
 - **Live Activity and notifications:** `GenerationActivityController` starts the activity when a generation starts (ActivityKit only allows that in the foreground) and updates or ends it from background relaunches too. `GenerationNotifier` posts notifications only when the app isn't active. With the mock API above, start a generation and go to the Home Screen to see both. Preview the activity's layouts in `ImageStudioWidgets/GenerationLiveActivity.swift`.
 - **App icon:** `swift scripts/make-icon.swift ImageStudio/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`
+- **Info.plist:** most keys come from `INFOPLIST_KEY_` build settings in `project.yml`. Those with no build setting, such as turning off multiple windows, are under the target's `info` properties, from which XcodeGen writes `ImageStudio/Info.plist`; edit `project.yml`, not the file.
 - **Signing:** automatic signing with team `359794K46A` (set in `project.yml`).
