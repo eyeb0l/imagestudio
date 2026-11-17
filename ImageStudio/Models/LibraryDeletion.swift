@@ -43,35 +43,28 @@ extension LibraryDeletion {
     }
 
     /// Records deletions in `context`, without saving it, so they're saved with the change they
-    /// describe. A pending deletion is owed to `accountID`. One already recorded keeps its account,
-    /// and an image already deleted in iCloud stays recorded as that: there's nothing left to tell
-    /// iCloud.
+    /// describe. A pending deletion is owed to `accountID`. One already recorded stays as it is: a
+    /// pending one is never in the library, so has nothing to remove here, and keeps its account.
     static func record(_ ids: some Collection<UUID>, as kind: Kind, owedTo accountID: String? = nil,
                        in context: ModelContext) throws {
         guard !ids.isEmpty else { return }
         let ids = Array(Set(ids))
-        var known = Dictionary(try context.fetch(FetchDescriptor<LibraryDeletion>(predicate: #Predicate { ids.contains($0.imageID) }))
-            .map { ($0.imageID, $0) }, uniquingKeysWith: { first, _ in first })
-        for id in ids {
-            if let entry = known[id] {
-                if kind == .remote {
-                    entry.kind = Kind.remote.rawValue
-                    entry.accountID = nil
-                }
-            } else {
-                let entry = LibraryDeletion(imageID: id, kind: kind, accountID: accountID)
-                context.insert(entry)
-                known[id] = entry
-            }
+        let known = Set(try context.fetch(FetchDescriptor<LibraryDeletion>(predicate: #Predicate { ids.contains($0.imageID) })).map(\.imageID))
+        for id in ids where !known.contains(id) {
+            context.insert(LibraryDeletion(imageID: id, kind: kind, accountID: accountID))
         }
     }
 
-    /// Forgets the deletions of these images (only those of `kind`, if given), without saving.
-    static func forget(_ ids: some Collection<UUID>, kind: Kind? = nil, in context: ModelContext) throws {
+    /// Forgets the deletions of these images that `accountID` has finished, without saving: those of
+    /// `kind` (both if `nil`), but of pending ones only those owed to `accountID`. The others are
+    /// still owed to another account, or to none, and keep the images out of this library.
+    static func forget(_ ids: some Collection<UUID>, kind: Kind? = nil, finishedBy accountID: String?,
+                       in context: ModelContext) throws {
         guard !ids.isEmpty else { return }
         let ids = Array(Set(ids))
         for entry in try context.fetch(FetchDescriptor<LibraryDeletion>(predicate: #Predicate { ids.contains($0.imageID) }))
         where kind == nil || entry.kind == kind?.rawValue {
+            guard entry.kind == Kind.remote.rawValue || entry.accountID == accountID else { continue }
             context.delete(entry)
         }
     }

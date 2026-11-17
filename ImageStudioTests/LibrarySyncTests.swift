@@ -879,6 +879,24 @@ struct DeletionJournalTests {
         #expect(try Data(contentsOf: unsent) == Data("unreadable".utf8))
     }
 
+    @Test func aResetStopsIfDeletionsSetAsideBeforeCantBeRead() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = directory.appending(path: "default.store")
+        let unsent = directory.appending(path: "Unsent Deletions.json")
+        _ = try LibraryStore.open(at: store)  // Nothing deleted in this one.
+        try Data("unreadable".utf8).write(to: unsent)
+
+        let model = AppModel(simulatesFailure: true, storeURL: store, backupsDirectory: directory.appending(path: "Library Backups"),
+                             syncStateURL: directory.appending(path: "Library Sync.json"), unsentDeletionsURL: unsent) {
+            try LibraryStore.open(at: store)
+        }
+        model.resetLibrary()
+
+        #expect(model.resetFailure != nil)
+        #expect(exists(store), "The library stays where it is.")
+    }
+
     @Test func aResetThatCantSetDeletionsAsideChangesNothing() throws {
         let directory = try temporaryDirectory()
         let locked = directory.appending(path: "Locked", directoryHint: .isDirectory)
@@ -962,6 +980,55 @@ struct DeletionJournalTests {
         #expect(relaunched.deletionsToSend == [first.id.uuidString])
     }
 
+    /// The image is in both accounts. Deleted here while syncing with A, then, after switching to B,
+    /// deleted in B from another device: A still has to be told.
+    @Test func anotherAccountsDeletionLeavesWhatsOwedToA() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let container = try makeContainer()
+        let studio = makeStudio(container: container)
+        let sync = LibrarySync(studio: studio, container: container, defaults: try offDefaults(),
+                               stateURL: directory.appending(path: "Library Sync.json"),
+                               unsentDeletionsURL: directory.appending(path: "Unsent Deletions.json"), usesCloudKit: false)
+        let image = try syncedImage(in: directory)
+        defer { try? ImageStore.delete(fileName: image.fileName) }
+        sync.adoptAccount("_A")
+        _ = studio.addSyncedImages([image])
+        studio.delete(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()))
+        sync.adoptAccount("_B")
+
+        #expect(studio.removeSyncedImages(ids: [image.id]).isEmpty)
+        #expect(try #require(sync.knownDeletions).accepts(image.id) == false)
+        sync.adoptAccount("_A")
+        #expect(sync.deletionsToSend == [image.id.uuidString])
+    }
+
+    @Test func doesntSwitchAccountsBeforeTheOldOnesDeletionsAreInTheStore() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = directory.appending(path: "default.store")
+        let syncState = directory.appending(path: "Library Sync.json")
+        _ = try LibraryStore.open(at: store)
+        let id = UUID().uuidString
+        var state = LibrarySyncState()
+        state.libraryID = LibraryStore.storeID(at: store)
+        state.accountID = "_A"
+        state.pendingDeletions = [id]  // e.g. from main, or recorded while the store couldn't be saved
+        try state.save(to: syncState)
+
+        // A library whose store can't be saved.
+        let readOnly = try ModelContainer(for: LibraryStore.schema, configurations: ModelConfiguration(
+            schema: LibraryStore.schema, url: store, allowsSave: false, cloudKitDatabase: .none))
+        let sync = LibrarySync(studio: makeStudio(container: readOnly), container: readOnly, defaults: try offDefaults(),
+                               stateURL: syncState, unsentDeletionsURL: directory.appending(path: "Unsent Deletions.json"),
+                               libraryID: LibraryStore.storeID(at: store), usesCloudKit: false)
+        #expect(sync.persistedState.pendingDeletions == [id], "Still in the sync state.")
+
+        #expect(!sync.adoptAccount("_B"))
+        let saved = LibrarySyncState.load(from: syncState)
+        #expect(saved.accountID == "_A" && saved.pendingDeletions == [id], "Kept, still owed to A.")
+    }
+
     @Test func deletionsKeepTheirAccountWhenTheSyncStateIsLost() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1026,10 +1093,24 @@ struct DeletionJournalTests {
         studio.deleteAll { try ImageStore.deleteAll(in: folder) }
         #expect(try LibraryDeletion.all(in: context).pending == Set(images[2...].map(\.id.uuidString)))
 
-        // An image deleted in iCloud stays recorded as that.
+        // A deletion already recorded stays as it is, with its account.
+        let other = UUID()
         try LibraryDeletion.record([images[2].id], as: .remote, in: context)
-        try LibraryDeletion.record([images[2].id], as: .pending, in: context)
+        try LibraryDeletion.record([other], as: .remote, in: context)
+        try LibraryDeletion.record([other], as: .pending, owedTo: "_A", in: context)
         try context.save()
-        #expect(try LibraryDeletion.all(in: context).remote == [images[2].id.uuidString])
+        let journal = try LibraryDeletion.all(in: context)
+        #expect(journal.remote == [other.uuidString])
+        #expect(journal.pending.contains(images[2].id.uuidString) && journal.owed.isEmpty)
+
+        // Only the account a pending deletion is owed to finishes it.
+        let owed = UUID()
+        try LibraryDeletion.record([owed], as: .pending, owedTo: "_A", in: context)
+        try LibraryDeletion.forget([owed], kind: .pending, finishedBy: "_B", in: context)
+        try context.save()
+        #expect(try LibraryDeletion.all(in: context).owed["_A"] == [owed.uuidString])
+        try LibraryDeletion.forget([owed], kind: .pending, finishedBy: "_A", in: context)
+        try context.save()
+        #expect(try LibraryDeletion.all(in: context).owed["_A"] == nil)
     }
 }

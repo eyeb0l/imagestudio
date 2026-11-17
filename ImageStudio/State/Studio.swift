@@ -606,7 +606,8 @@ final class Studio {
 
     /// Removes images that were deleted on another device, with their files and any reference files
     /// nothing else uses. Their recorded deletions (`LibraryDeletion`) are done with, so they're
-    /// forgotten in the same save, including for images that are already gone from here. Returns
+    /// forgotten in the same save, including for images that are already gone from here, except those
+    /// still owed to another account. Returns
     /// the IDs still in the library because removing them failed.
     @discardableResult
     func removeSyncedImages(ids: [UUID]) -> [UUID] {
@@ -618,7 +619,9 @@ final class Studio {
             Self.log.error("Couldn't look up synced deletions: \(error.localizedDescription, privacy: .public)")
             return ids
         }
-        let forget: (ModelContext) throws -> Void = { try LibraryDeletion.forget(ids, in: $0) }
+        // Deleted in the account the library syncs with, so only what's owed to it is done with.
+        let account = libraryObserver?.accountID
+        let forget: (ModelContext) throws -> Void = { try LibraryDeletion.forget(ids, finishedBy: account, in: $0) }
         guard !images.isEmpty else {
             // In a context of its own, so a failure leaves anything waiting in the main one alone.
             let journal = ModelContext(container)

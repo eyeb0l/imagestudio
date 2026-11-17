@@ -154,9 +154,10 @@ nonisolated struct UnsentDeletions: Codable, Equatable {
                 unsent.deletions.formUnion(state.pendingDeletions.map { Deletion(id: $0, accountID: state.accountID) })
             }
         }
-        guard !unsent.deletions.isEmpty else { return }
-        // Set aside by a reset that didn't finish.
+        // Set aside by a reset that didn't finish. Read even with nothing to add, so one that can't be
+        // read stops this reset too.
         if let earlier = try load(from: url) { unsent.deletions.formUnion(earlier.deletions) }
+        guard !unsent.deletions.isEmpty else { return }
         try JSONEncoder().encode(unsent).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }
@@ -225,6 +226,8 @@ final class LibrarySync: LibraryObserver {
     private static let log = Logger(subsystem: "com.eyeb0l.ImageStudio", category: "LibrarySync")
     static let enabledKey = "iCloudSyncEnabled"
     static let signedOutMessage = "Sign in to iCloud in the Settings app to sync your library."
+    static let accountNotChangedNotice = "iCloud Sync was turned off because Image Studio couldn't save this library's changes before syncing with a different iCloud account. Turn it on to try again."
+    static let untakenDeletionsError = "Couldn't read the deletions kept from the library you reset. Image Studio will try again."
     static let accountChangedNotice = "Your iCloud account changed, so iCloud Sync was turned off rather than copy this library into a different account. Turn it on to sync with the account you're signed in to now."
 
     private var context: ModelContext { container.mainContext }
@@ -376,13 +379,18 @@ final class LibrarySync: LibraryObserver {
             return
         }
         approvesAccountChange = false
-        adoptAccount(userID)
+        guard adoptAccount(userID) else {
+            isEnabled = false
+            notice = Self.accountNotChangedNotice
+            return
+        }
         if hasUntakenDeletions { hasUntakenDeletions = !takeUnsentDeletions() }
         guard !hasUntakenDeletions else {
-            syncError = "Couldn't read the deletions kept from the library you reset. Image Studio will try again."
+            syncError = Self.untakenDeletionsError
             refreshStatus()
             return
         }
+        if syncError == Self.untakenDeletionsError { syncError = nil }
         startEngine()
         refreshStatus()
         sendOutstandingWork()
@@ -390,15 +398,18 @@ final class LibrarySync: LibraryObserver {
 
     /// Makes `userID` the account this library syncs with. Deletions still owed to the previous
     /// account stay owed to it (see `LibraryDeletion.accountID`), and are sent if it comes back.
-    func adoptAccount(_ userID: String) {
-        guard state.accountID != userID else { return }
-        if state.accountID != nil { Self.log.notice("Syncing with a different iCloud account, as agreed") }
+    /// Returns whether it did: not if those in the sync state couldn't be moved into the store,
+    /// where they keep their account.
+    @discardableResult
+    func adoptAccount(_ userID: String) -> Bool {
+        guard state.accountID != userID else { return true }
         stopEngine()
-        // Those in the sync state are owed to the previous account too, so they go into the store first.
-        journalStateDeletions()
+        guard journalStateDeletions() else { return false }
+        if state.accountID != nil { Self.log.notice("Syncing with a different iCloud account, as agreed") }
         state.forgetServer()
         state.accountID = userID
         persist()
+        return true
     }
 
     // MARK: Local changes
@@ -530,7 +541,8 @@ final class LibrarySync: LibraryObserver {
         }
     }
 
-    /// Forgets deletions that are finished, wherever they're recorded.
+    /// Forgets deletions that the account this library syncs with has finished, wherever they're
+    /// recorded.
     private func forgetDeletions(_ names: Set<String>, kind: LibraryDeletion.Kind) {
         guard !names.isEmpty else { return }
         switch kind {
@@ -538,7 +550,8 @@ final class LibrarySync: LibraryObserver {
         case .remote: state.remoteDeletions.subtract(names)
         }
         do {
-            try LibraryDeletion.forget(names.compactMap(UUID.init(uuidString:)), kind: kind, in: journalContext)
+            try LibraryDeletion.forget(names.compactMap(UUID.init(uuidString:)), kind: kind, finishedBy: state.accountID,
+                                       in: journalContext)
             try journalContext.save()
         } catch {
             // Only costs a deletion sent again, which finds nothing.
