@@ -25,6 +25,7 @@ struct ImageStudioApp: App {
                     .environment(services.preferences)
                     .environment(services.composer)
                     .environment(services.studio)
+                    .environment(services.sync)
                     .environment(GenerationNotifier.shared)
                     .modelContainer(services.container)
             case .recovery:
@@ -34,6 +35,7 @@ struct ImageStudioApp: App {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, case .ready(let services) = model.state else { return }
             services.updates.appBecameActive()
+            services.sync.appBecameActive()
         }
     }
 }
@@ -51,6 +53,7 @@ final class AppModel {
         let composer: Composer
         let studio: Studio
         let updates: GenerationUpdates
+        let sync: LibrarySync
     }
 
     enum State {
@@ -67,17 +70,20 @@ final class AppModel {
     @ObservationIgnored private let opener: @MainActor () throws -> ModelContainer
     @ObservationIgnored private let storeURL: URL
     @ObservationIgnored private let backupsDirectory: URL
+    @ObservationIgnored private let syncStateURL: URL
     @ObservationIgnored private let rasterCache: SVGRasterCache
     @ObservationIgnored private var simulatesFailure: Bool
 
     init(simulatesFailure: Bool = AppModel.launchRequestsSimulatedFailure,
          storeURL: URL = LibraryStore.defaultStoreURL,
          backupsDirectory: URL = LibraryStore.backupsDirectory,
+         syncStateURL: URL = LibrarySyncState.defaultURL,
          rasterCache: SVGRasterCache = .shared,
          opener: @escaping @MainActor () throws -> ModelContainer = LibraryStore.open) {
         self.simulatesFailure = simulatesFailure
         self.storeURL = storeURL
         self.backupsDirectory = backupsDirectory
+        self.syncStateURL = syncStateURL
         self.rasterCache = rasterCache
         self.opener = opener
         tryOpen()
@@ -90,7 +96,8 @@ final class AppModel {
     }
 
     /// Moves the current store files into a timestamped folder under Library Backups (never
-    /// deleting them), then opens a fresh library. Image files are left where they are.
+    /// deleting them), then opens a fresh library. Image files are left where they are. With iCloud
+    /// Sync on, the fresh library downloads everything in iCloud again.
     func resetLibrary(date: Date = .now) {
         do {
             try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date)
@@ -100,6 +107,8 @@ final class AppModel {
         }
         // Images in the new library are rendered afresh when they're next shown.
         rasterCache.removeAll()
+        // Sync state describes the old library: what it already has from iCloud.
+        try? FileManager.default.removeItem(at: syncStateURL)
         resetFailure = nil
         simulatesFailure = false
         tryOpen()
@@ -133,7 +142,8 @@ final class AppModel {
         #endif
 
         return Services(container: container, apiKeys: apiKeys, preferences: Preferences(),
-                        composer: Composer(), studio: studio, updates: updates)
+                        composer: Composer(), studio: studio, updates: updates,
+                        sync: LibrarySync(studio: studio, container: container, stateURL: syncStateURL))
     }
 
     private static func describe(_ error: Error) -> String {
@@ -161,12 +171,22 @@ enum LibraryStore {
     }
     #endif
 
+    /// `cloudKitDatabase: .none` matters: with an iCloud container in the entitlements, SwiftData
+    /// would otherwise mirror the store to CloudKit itself, which this schema doesn't allow (unique
+    /// IDs, attributes without defaults), so the library wouldn't open. `LibrarySync` syncs instead.
+    private static let schema = Schema([GeneratedImage.self, PendingGeneration.self])
+
     private static var configuration: ModelConfiguration {
-        ModelConfiguration(for: GeneratedImage.self, PendingGeneration.self)
+        ModelConfiguration(schema: schema, cloudKitDatabase: .none)
     }
 
     static func open() throws -> ModelContainer {
-        try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, configurations: configuration)
+        try ModelContainer(for: schema, configurations: configuration)
+    }
+
+    /// Opens a library at another location, configured as the real one is.
+    static func open(at url: URL) throws -> ModelContainer {
+        try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none))
     }
 
     /// Where SwiftData keeps the library by default (`default.store` in Application Support).

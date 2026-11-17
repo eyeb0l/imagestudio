@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(Preferences.self) private var preferences
     @Environment(Studio.self) private var studio
     @Environment(Composer.self) private var composer
+    @Environment(LibrarySync.self) private var sync
     @Environment(\.dismiss) private var dismiss
 
     @Query private var images: [GeneratedImage]
@@ -26,6 +27,8 @@ struct SettingsView: View {
                         .disabled(images.isEmpty)
                 }
 
+                ICloudSyncSection()
+
                 Section {
                     LabeledContent("Version", value: appVersion)
                 } footer: {
@@ -40,7 +43,9 @@ struct SettingsView: View {
                 }
             }
             .confirmationDialog(
-                "All \(images.count) images will be permanently deleted.",
+                sync.isEnabled
+                    ? "All \(images.count) images will be permanently deleted from this device, iCloud and your other devices."
+                    : "All \(images.count) images will be permanently deleted.",
                 isPresented: $showingDeleteAll,
                 titleVisibility: .visible
             ) {
@@ -58,6 +63,49 @@ struct SettingsView: View {
         let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = info?["CFBundleVersion"] as? String ?? "1"
         return "\(version) (\(build))"
+    }
+}
+
+// MARK: - iCloud Sync
+
+private struct ICloudSyncSection: View {
+    @Environment(LibrarySync.self) private var sync
+
+    var body: some View {
+        @Bindable var sync = sync
+
+        Section {
+            Toggle("iCloud Sync", isOn: $sync.isEnabled)
+            if sync.isEnabled {
+                LabeledContent("Status") {
+                    switch sync.status {
+                    case .syncing:
+                        HStack(spacing: 6) {
+                            ProgressView()
+                            Text("Syncing")
+                        }
+                    case .upToDate:
+                        Text("Up to Date")
+                    case .off, .unavailable, .failed:
+                        Text("Not Syncing")
+                    }
+                }
+            }
+        } header: {
+            Text("iCloud")
+        } footer: {
+            VStack(alignment: .leading, spacing: 8) {
+                switch sync.status {
+                case .unavailable(let message): Text(message).foregroundStyle(.orange)
+                case .failed(let message): Text(message).foregroundStyle(.red)
+                default: EmptyView()
+                }
+                if let notice = sync.notice {
+                    Text(notice).foregroundStyle(.orange)
+                }
+                Text("Keeps your images, with their prompts and references, the same on every device signed in to your iCloud account. Images you delete while it's off are deleted from your other devices when it's turned back on. Your API key and the prompt box stay on this device.")
+            }
+        }
     }
 }
 
