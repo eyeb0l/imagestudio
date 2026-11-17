@@ -7,6 +7,7 @@ struct LibraryView: View {
     @Environment(Preferences.self) private var preferences
     @Environment(APIKeyStore.self) private var apiKeys
     @Environment(GenerationNotifier.self) private var notifier
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @Query(sort: \GeneratedImage.createdAt, animation: .snappy) private var images: [GeneratedImage]
 
@@ -23,7 +24,12 @@ struct LibraryView: View {
     @FocusState private var composerFocused: Bool
     @Namespace private var zoomNamespace
 
-    private let columns = [GridItem(.adaptive(minimum: 100, maximum: 200), spacing: 2)]
+    /// Larger tiles when there's room for them, as in Photos on iPad.
+    private var columns: [GridItem] {
+        horizontalSizeClass == .regular
+            ? [GridItem(.adaptive(minimum: 150, maximum: 260), spacing: 2)]
+            : [GridItem(.adaptive(minimum: 100, maximum: 200), spacing: 2)]
+    }
 
     var body: some View {
         @Bindable var composer = composer
@@ -136,6 +142,7 @@ struct LibraryView: View {
     private func tile(for image: GeneratedImage) -> some View {
         LibraryTile(image: image, isSelecting: isSelecting, isSelected: selection.contains(image.id))
             .matchedTransitionSource(id: image.id, in: zoomNamespace)
+            .hoverEffect(.highlight)
             .onTapGesture { tap(image) }
             .contextMenu {
                 if !isSelecting {
@@ -216,6 +223,7 @@ struct LibraryView: View {
             ToolbarSpacer(.fixed, placement: .topBarTrailing)
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Settings", systemImage: "gearshape") { showingSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
             }
         }
     }

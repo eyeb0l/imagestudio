@@ -32,6 +32,16 @@ targets:
       - path: Shared
     dependencies:
       - target: ImageStudioWidgets
+    # Merged with the keys generated from the INFOPLIST_KEY_ settings below.
+    info:
+      path: ImageStudio/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # One window: every window would share the prompt box, its references and the markup
+        # canvas (Composer), so a second one would open the same canvas and edit the same draft.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyeb0l.ImageStudio
@@ -41,7 +51,6 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Image Studio
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.graphics-design
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight

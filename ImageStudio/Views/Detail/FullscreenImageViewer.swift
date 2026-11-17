@@ -58,6 +58,7 @@ struct FullscreenImageViewer: View {
                     .frame(width: 36, height: 36)
             }
             .buttonStyle(.glass)
+            .keyboardShortcut(.cancelAction)
             .buttonBorderShape(.circle)
             .accessibilityLabel("Close")
             .padding(.horizontal, 16)
@@ -109,8 +110,8 @@ private struct ZoomableImage: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+    func makeUIView(context: Context) -> ZoomingScrollView {
+        let scrollView = ZoomingScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 6
@@ -121,8 +122,8 @@ private struct ZoomableImage: UIViewRepresentable {
 
         let content = ZoomableContentView(image: image)
         content.frame = scrollView.bounds
-        content.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scrollView.addSubview(content)
+        scrollView.content = content
         context.coordinator.content = content
 
         let doubleTap = UITapGestureRecognizer(target: context.coordinator,
@@ -132,7 +133,7 @@ private struct ZoomableImage: UIViewRepresentable {
         return scrollView
     }
 
-    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+    func updateUIView(_ scrollView: ZoomingScrollView, context: Context) {
         context.coordinator.content?.image = image
         context.coordinator.content?.showsVectorBackdrop = showsVectorBackdrop
         context.coordinator.vector = vector
@@ -201,6 +202,23 @@ private struct ZoomableImage: UIViewRepresentable {
                 content?.setVectorDetail(detail, frame: visible)
             }
         }
+    }
+}
+
+/// Goes back to the fitted image when its size changes, as when the device rotates or the window is
+/// resized: a zoomed view's frame is scaled, so resizing it with its superview would distort it.
+private final class ZoomingScrollView: UIScrollView {
+    weak var content: UIView?
+    private var laidOutSize: CGSize?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let content, bounds.size != laidOutSize else { return }
+        laidOutSize = bounds.size
+        zoomScale = minimumZoomScale
+        content.frame = CGRect(origin: .zero, size: bounds.size)
+        contentSize = bounds.size
+        contentOffset = .zero
     }
 }
 

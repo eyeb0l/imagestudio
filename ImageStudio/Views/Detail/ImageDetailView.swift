@@ -142,64 +142,118 @@ private struct ImageDetailPage: View {
     /// Opens a file (this image or one of its references) full screen.
     var onOpenFullscreen: (FullscreenItem) -> Void
 
-    var body: some View {
-        let fileIsMissing = !image.fileIsAvailable
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                StoredImageView(fileName: image.fileName, maxPixelSize: FullscreenImageViewer.detailPixelSize, contentMode: .fit,
-                                animates: image.format.isAnimated && isInView)
-                    .aspectRatio(image.aspectRatio, contentMode: .fit)
-                    .transparencyBackdrop(for: image)
-                    .frame(maxWidth: .infinity, maxHeight: 460)
-                    .contentShape(.rect)
-                    .onTapGesture { onOpenFullscreen(FullscreenItem(url: image.fileURL)) }
-                    .accessibilityLabel("Image. Double tap to view full screen.")
-                    .accessibilityAddTraits(.isButton)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var pageSize: CGSize = .zero
 
-                if fileIsMissing {
-                    Label("The image file is missing from this device.", systemImage: "exclamationmark.circle")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+    /// Wide enough, and wider than tall, to show the image beside its details rather than above them.
+    private var showsSideBySide: Bool {
+        pageSize.width >= 700 && pageSize.width > pageSize.height
+    }
+
+    var body: some View {
+        Group {
+            if showsSideBySide {
+                HStack(spacing: 0) {
+                    picture
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(20)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 28) {
+                            missingFileNotice
+                            information
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 20)
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(width: min(400, pageSize.width * 0.4))
+                }
+            } else {
+                stacked
+            }
+        }
+        .onGeometryChange(for: CGSize.self, of: \.size) { pageSize = $0 }
+    }
+
+    /// Image above details: a phone, a narrow window, or an iPad held upright.
+    private var stacked: some View {
+        // In a regular width the image can take more of the height, and lines of text are kept to
+        // a readable length. A phone keeps its fixed sizes.
+        let isRegular = horizontalSizeClass == .regular
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                picture
+                    .frame(maxWidth: .infinity, maxHeight: isRegular ? max(460, pageSize.height * 0.6) : 460)
+
+                if !image.fileIsAvailable {
+                    missingFileNotice
                         .padding(.horizontal, 20)
                         .padding(.top, -12)
                 }
 
-                VStack(alignment: .leading, spacing: 28) {
-                    PromptBlock(title: "Prompt", text: image.prompt)
-                    if let revised = image.revisedPrompt, revised != image.prompt {
-                        PromptBlock(title: "Revised Prompt", text: revised)
-                    }
-                    if !image.referenceFileNames.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            SectionLabel("References")
-                            ScrollView(.horizontal) {
-                                HStack(spacing: 8) {
-                                    if let markup = image.markupFileName, let first = image.referenceFileNames.first {
-                                        MarkupTile(reference: first, markup: markup, onOpenFullscreen: onOpenFullscreen)
-                                    }
-                                    ForEach(image.referenceFileNames, id: \.self) { name in
-                                        Button {
-                                            onOpenFullscreen(FullscreenItem(url: ReferenceStore.url(for: name)))
-                                        } label: {
-                                            ReferenceThumbnail(fileName: name, size: 72)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .disabled(!ReferenceStore.fileExists(name))
-                                    }
-                                }
-                            }
-                            .scrollIndicators(.hidden)
-                            .scrollClipDisabled()
-                        }
-                    }
-                    DetailsGrid(image: image, fileIsMissing: fileIsMissing)
-                }
-                .padding(.horizontal, 20)
+                information
+                    .padding(.horizontal, 20)
+                    .frame(maxWidth: isRegular ? 680 : .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity)
             }
             .padding(.top, 8)
             .padding(.bottom, 32)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private var picture: some View {
+        StoredImageView(fileName: image.fileName, maxPixelSize: FullscreenImageViewer.detailPixelSize, contentMode: .fit,
+                        animates: image.format.isAnimated && isInView)
+            .aspectRatio(image.aspectRatio, contentMode: .fit)
+            .transparencyBackdrop(for: image)
+            .contentShape(.rect)
+            .onTapGesture { onOpenFullscreen(FullscreenItem(url: image.fileURL)) }
+            .accessibilityLabel("Image. Double tap to view full screen.")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    @ViewBuilder
+    private var missingFileNotice: some View {
+        if !image.fileIsAvailable {
+            Label("The image file is missing from this device.", systemImage: "exclamationmark.circle")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var information: some View {
+        let fileIsMissing = !image.fileIsAvailable
+        return VStack(alignment: .leading, spacing: 28) {
+            PromptBlock(title: "Prompt", text: image.prompt)
+            if let revised = image.revisedPrompt, revised != image.prompt {
+                PromptBlock(title: "Revised Prompt", text: revised)
+            }
+            if !image.referenceFileNames.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionLabel("References")
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            if let markup = image.markupFileName, let first = image.referenceFileNames.first {
+                                MarkupTile(reference: first, markup: markup, onOpenFullscreen: onOpenFullscreen)
+                            }
+                            ForEach(image.referenceFileNames, id: \.self) { name in
+                                Button {
+                                    onOpenFullscreen(FullscreenItem(url: ReferenceStore.url(for: name)))
+                                } label: {
+                                    ReferenceThumbnail(fileName: name, size: 72)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!ReferenceStore.fileExists(name))
+                            }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
+                    .scrollClipDisabled()
+                }
+            }
+            DetailsGrid(image: image, fileIsMissing: fileIsMissing)
+        }
     }
 }
 
