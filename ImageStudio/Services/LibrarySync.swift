@@ -112,7 +112,7 @@ nonisolated struct LibrarySyncState: Codable {
 /// key stay on this device. Turning sync off pauses it: images deleted in the meantime are
 /// deleted from iCloud when it's turned back on, and new ones are uploaded.
 ///
-/// Nothing is sent until the signed-in account is known to be the one this library syncs with. If
+/// Nothing is fetched or sent until the signed-in account is known to be the one this library syncs with. If
 /// it's a different one, syncing turns off rather than copy the library into that account; turning
 /// it back on agrees to sync with the account signed in at the time.
 @Observable
@@ -151,13 +151,11 @@ final class LibrarySync: LibraryObserver {
     @ObservationIgnored private var state: LibrarySyncState
     @ObservationIgnored private var engine: CKSyncEngine?
     @ObservationIgnored private var accountObserver: (any NSObjectProtocol)?
-    /// The signed-in account is the one this library syncs with, so changes may be sent.
-    @ObservationIgnored private var accountConfirmed = false
     /// The user turned syncing on, agreeing to sync with whichever account is signed in. Lasts only
     /// until the next account check, so it can't apply to an account that signs in later.
     @ObservationIgnored private var approvesAccountChange = false
-    /// The engine whose account is being checked, so there's one check at a time for each.
-    @ObservationIgnored private weak var checkingEngine: CKSyncEngine?
+    /// The account check under way, if any. Replaced or cleared to make its answer out of date.
+    @ObservationIgnored private var accountCheck: UUID?
     /// The account may have changed while a check was under way, so its answer is out of date.
     @ObservationIgnored private var recheckAccount = false
 
@@ -173,7 +171,10 @@ final class LibrarySync: LibraryObserver {
     static let accountChangedNotice = "Your iCloud account changed, so iCloud Sync was turned off rather than copy this library into a different account. Turn it on to sync with the account you're signed in to now."
 
     private var context: ModelContext { container.mainContext }
-    private var canSend: Bool { engine != nil && accountConfirmed }
+    /// The engine only exists once the signed-in account is confirmed as the one this library syncs
+    /// with, so nothing is fetched from or sent to any other account.
+    private var accountConfirmed: Bool { engine != nil }
+    private var canSend: Bool { engine != nil }
 
     /// `libraryID` identifies the library's store (see `LibraryStore.storeID`). `usesCloudKit: false`
     /// keeps everything local, for unit tests (which host the app).
@@ -200,59 +201,65 @@ final class LibrarySync: LibraryObserver {
 
     private func start() {
         guard engine == nil else { return }
-        accountConfirmed = false
         accountProblem = nil
         syncError = nil
         hasFetched = false
         isBusy = false
         refreshStatus()
         guard usesCloudKit else { return }
-
-        let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
-        engine = CKSyncEngine(CKSyncEngine.Configuration(database: cloud.privateCloudDatabase,
-                                                         stateSerialization: state.engineState, delegate: self))
         if accountObserver == nil {
             accountObserver = NotificationCenter.default.addObserver(forName: .CKAccountChanged, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.checkAccount() }
+                MainActor.assumeIsolated { self?.checkAccount(invalidating: true) }
             }
         }
         checkAccount()
     }
 
+    /// Turns syncing off: stops the engine and any account check.
     private func stop() {
-        let stopping = engine
-        engine = nil
-        accountConfirmed = false
+        accountCheck = nil
+        stopEngine()
         refreshStatus()
-        if let stopping { Task { await stopping.cancelOperations() } }
     }
 
-    private func restart() {
-        stop()
-        start()
+    private func stopEngine() {
+        guard let stopping = engine else { return }
+        engine = nil
+        Task { await stopping.cancelOperations() }
+    }
+
+    /// Starts the engine for the account just confirmed.
+    private func startEngine() {
+        guard engine == nil else { return }
+        hasFetched = false
+        isBusy = false
+        let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
+        engine = CKSyncEngine(CKSyncEngine.Configuration(database: cloud.privateCloudDatabase,
+                                                         stateSerialization: state.engineState, delegate: self))
     }
 
     /// Picks up anything missed: images iCloud doesn't have, deletions still to make, and downloads
     /// that failed. Cheap when there's nothing to do; `CKSyncEngine` fetches by itself.
     func appBecameActive() {
-        if engine != nil, !accountConfirmed { checkAccount(afterAccountChange: false) }
+        // e.g. the last check couldn't reach iCloud.
+        if isEnabled, engine == nil { checkAccount() }
         sendOutstandingWork()
     }
 
-    /// Checks which account is signed in before anything is sent to it. `afterAccountChange` makes a
-    /// check already under way out of date; otherwise that check is left to answer.
-    private func checkAccount(afterAccountChange: Bool = true) {
-        guard usesCloudKit, let current = engine else { return }
-        guard checkingEngine !== current else {
-            if afterAccountChange {
-                accountConfirmed = false
-                recheckAccount = true
-            }
+    /// Checks which account is signed in; the engine runs only once it's the one this library syncs
+    /// with. `invalidating` (the account may have changed) makes a check already under way out of
+    /// date; otherwise that check is left to answer. `stopping` stops the engine until it's checked.
+    private func checkAccount(invalidating: Bool = false, stopping: Bool = false) {
+        guard usesCloudKit, isEnabled else { return }
+        if stopping { stopEngine() }
+        guard accountCheck == nil else {
+            if invalidating { recheckAccount = true }
             return
         }
-        accountConfirmed = false
-        checkingEngine = current
+        let check = UUID()
+        accountCheck = check
         recheckAccount = false
+        refreshStatus()
         Task {
             let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
             let problem: String?
@@ -271,8 +278,8 @@ final class LibrarySync: LibraryObserver {
             } catch {
                 problem = "Couldn't check your iCloud account: \(error.localizedDescription)"
             }
-            if checkingEngine === current { checkingEngine = nil }
-            guard current === engine else { return }
+            guard accountCheck == check else { return }
+            accountCheck = nil
             if recheckAccount {
                 // The account may have changed, so agreeing to sync no longer says with which one.
                 approvesAccountChange = false
@@ -285,6 +292,7 @@ final class LibrarySync: LibraryObserver {
             } else {
                 // Agreeing to sync applies to the account signed in now, not one that signs in later.
                 approvesAccountChange = false
+                stopEngine()
                 refreshStatus()
             }
         }
@@ -300,20 +308,15 @@ final class LibrarySync: LibraryObserver {
                 return
             }
             Self.log.notice("Syncing with a different iCloud account, as agreed")
-            // Used up here, so it can't also cover another account the restarted check might find.
-            approvesAccountChange = false
+            stopEngine()
             state.forgetServer()
-            state.accountID = userID
-            persist()
-            restart()
-            return
         }
         approvesAccountChange = false
-        if state.accountID == nil {
+        if state.accountID != userID {
             state.accountID = userID
             persist()
         }
-        accountConfirmed = true
+        startEngine()
         refreshStatus()
         sendOutstandingWork()
     }
@@ -472,16 +475,18 @@ final class LibrarySync: LibraryObserver {
 
     private func handleAccountChange(_ change: CKSyncEngine.Event.AccountChange.ChangeType) {
         switch change {
-        case .signIn, .switchAccounts:
-            // Nothing is sent until the account is checked against the one this library syncs with.
-            checkAccount()
+        case .signIn(let user), .switchAccounts(_, let user):
+            // A new engine reports the account it starts with: the one just confirmed.
+            guard user.recordName != state.accountID else { return }
+            // Another account: stopped at once, so nothing more is fetched into this library.
+            checkAccount(invalidating: true, stopping: true)
         case .signOut:
             // The library stays on this device, and remembers its account in case it signs back in.
             state.engineState = nil
             persist()
-            restart()
+            checkAccount(invalidating: true, stopping: true)
         @unknown default:
-            checkAccount()
+            checkAccount(invalidating: true, stopping: true)
         }
     }
 
@@ -563,8 +568,8 @@ final class LibrarySync: LibraryObserver {
             }
         }
         for (recordID, error) in changes.failedRecordDeletes {
-            if error.code == .unknownItem {
-                // Never made it to iCloud, or already deleted.
+            if error.code == .unknownItem || error.code == .zoneNotFound {
+                // Never made it to iCloud, or already deleted (with its zone, if there isn't one).
                 state.uploaded.remove(recordID.recordName)
                 state.pendingDeletions.remove(recordID.recordName)
             } else {
