@@ -418,6 +418,7 @@ final class LibrarySync: LibraryObserver {
             if changes.savedZones.contains(where: { $0.zoneID == LibraryRecord.zoneID }) {
                 state.zoneCreated = true
                 persist()
+                if syncError?.hasPrefix("Couldn't set up iCloud") == true { syncError = nil }
             }
             for failure in changes.failedZoneSaves {
                 Self.log.error("Couldn't create the iCloud zone: \(failure.error.localizedDescription, privacy: .public)")
