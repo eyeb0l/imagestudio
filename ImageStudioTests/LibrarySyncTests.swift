@@ -253,6 +253,79 @@ struct LibrarySyncApplyTests {
         #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 0)
     }
 
+    @Test func givesAnImageItsOwnFileWhenItsNameIsTaken() throws {
+        let container = try makeContainer()
+        let studio = makeStudio(container: container)
+        let directory = try temporaryDirectory()
+        let sharedName = "ImageStudio-20261117-120000-ABCDEF.png"
+        let first = try syncedImage(fileName: sharedName, in: directory)
+        var second = try syncedImage(fileName: sharedName, in: directory)
+        try Data("OTHER IMAGE".utf8).write(to: second.file)
+        second.fileSize = 11
+        let secondName = Studio.uniqueFileName(for: second)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            for name in [sharedName, secondName] { try? ImageStore.delete(fileName: name) }
+        }
+
+        _ = studio.addSyncedImages([first])
+        #expect(studio.addSyncedImages([second]).present == [second.id])
+
+        let records = try container.mainContext.fetch(FetchDescriptor<GeneratedImage>())
+        let stored = try #require(records.first { $0.id == second.id })
+        #expect(stored.fileName == secondName)
+        #expect(try Data(contentsOf: ImageStore.url(for: secondName)) == Data("OTHER IMAGE".utf8))
+
+        // Deleting one never takes the other's file with it.
+        studio.removeSyncedImages(ids: [first.id])
+        #expect(try Data(contentsOf: ImageStore.url(for: secondName)) == Data("OTHER IMAGE".utf8))
+    }
+
+    @Test func doesNotReuseALeftOverFileOfAnotherSize() throws {
+        let container = try makeContainer()
+        let studio = makeStudio(container: container)
+        let directory = try temporaryDirectory()
+        let image = try syncedImage(in: directory)
+        try Data("SOMETHING ELSE ENTIRELY".utf8).write(to: ImageStore.url(for: image.fileName))
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            for name in [image.fileName, Studio.uniqueFileName(for: image)] { try? ImageStore.delete(fileName: name) }
+        }
+
+        _ = studio.addSyncedImages([image])
+
+        let stored = try #require(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()).first)
+        #expect(stored.fileName == Studio.uniqueFileName(for: image))
+        #expect(try Data(contentsOf: ImageStore.url(for: stored.fileName)) == Data("IMAGE".utf8))
+    }
+
+    @Test func deliversAgainUntilEveryReferenceIsInPlace() throws {
+        let container = try makeContainer()
+        let studio = makeStudio(container: container)
+        let directory = try temporaryDirectory()
+        let referenceName = "\(UUID().uuidString).jpg"
+        let image = try syncedImage(in: directory, references: [referenceName: Data("REF".utf8)])
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? ImageStore.delete(fileName: image.fileName)
+            ReferenceStore.delete([referenceName])
+        }
+
+        struct Interrupted: Error {}
+        let first = studio.addSyncedImages([image]) { source, destination in
+            if destination.lastPathComponent == referenceName { throw Interrupted() }
+            return try Studio.copyIfMissing(from: source, to: destination)
+        }
+        #expect(first.failed == [image.id], "Added, but to be delivered again for its reference.")
+        #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 1)
+        #expect(!ReferenceStore.fileExists(referenceName))
+
+        let second = studio.addSyncedImages([image])
+        #expect(second.present == [image.id])
+        #expect(ReferenceStore.fileExists(referenceName))
+        #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 1)
+    }
+
     @Test func removesImagesDeletedElsewhereWithoutEchoing() throws {
         let container = try makeContainer()
         let studio = makeStudio(container: container)
@@ -263,7 +336,7 @@ struct LibrarySyncApplyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         _ = studio.addSyncedImages([image])
 
-        studio.removeSyncedImages(ids: [image.id, UUID()])
+        #expect(studio.removeSyncedImages(ids: [image.id, UUID()]).isEmpty, "Nothing left behind.")
 
         #expect(try container.mainContext.fetchCount(FetchDescriptor<GeneratedImage>()) == 0)
         #expect(!exists(ImageStore.url(for: image.fileName)))
@@ -324,13 +397,16 @@ struct LibrarySyncStateTests {
         var state = LibrarySyncState()
         state.zoneCreated = true
         state.uploaded = ["a", "b"]
-        state.pausedDeletions = ["c"]
+        state.pendingDeletions = ["c"]
         state.failedDownloads = ["d"]
+        state.remoteDeletions = ["e"]
+        state.accountID = "_user"
         try state.save(to: url)
 
         let loaded = LibrarySyncState.load(from: url)
-        #expect(loaded.zoneCreated)
-        #expect(loaded.uploaded == ["a", "b"] && loaded.pausedDeletions == ["c"] && loaded.failedDownloads == ["d"])
+        #expect(loaded.zoneCreated && loaded.accountID == "_user")
+        #expect(loaded.uploaded == ["a", "b"] && loaded.pendingDeletions == ["c"] && loaded.failedDownloads == ["d"])
+        #expect(loaded.remoteDeletions == ["e"])
 
         try Data("not json".utf8).write(to: url)
         let damaged = LibrarySyncState.load(from: url)
@@ -341,14 +417,14 @@ struct LibrarySyncStateTests {
         let (a, b) = (UUID(), UUID())
         var state = LibrarySyncState()
         state.uploaded = [a.uuidString]
-        #expect(state.notUploaded([a, b]) == [b])
+        #expect(state.toUpload([a, b]) == [b])
     }
 
-    @Test func remembersDeletionsWhileOff() throws {
+    @Test func remembersEveryDeletionUntilICloudConfirmsIt() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appending(path: "Library Sync.json")
-        let (uploaded, localOnly) = (UUID(), UUID())
+        let (uploaded, inFlight) = (UUID(), UUID())
         var state = LibrarySyncState()
         state.uploaded = [uploaded.uuidString]
         try state.save(to: url)
@@ -360,10 +436,28 @@ struct LibrarySyncStateTests {
                                stateURL: url, usesCloudKit: false)
         #expect(!sync.isEnabled && sync.status == .off)
 
-        sync.imagesDeleted([uploaded, localOnly])
+        // `inFlight` may have reached iCloud without this device hearing back, so it's kept too.
+        sync.imagesDeleted([uploaded, inFlight])
 
-        #expect(LibrarySyncState.load(from: url).pausedDeletions == [uploaded.uuidString],
-                "Only images iCloud has need deleting there.")
+        let saved = LibrarySyncState.load(from: url)
+        #expect(saved.pendingDeletions == [uploaded.uuidString, inFlight.uuidString])
+        #expect(saved.toUpload([uploaded, inFlight]).isEmpty)
+    }
+
+    @Test func neverUploadsOrAcceptsImagesOnTheirWayOut() {
+        let (local, deletedHere, deletedThere, inICloud) = (UUID(), UUID(), UUID(), UUID())
+        var state = LibrarySyncState()
+        state.uploaded = [inICloud.uuidString]
+        state.pendingDeletions = [deletedHere.uuidString]
+        state.remoteDeletions = [deletedThere.uuidString]
+
+        #expect(state.toUpload([local, deletedHere, deletedThere, inICloud]) == [local])
+        #expect(state.accepts(local) && state.accepts(inICloud))
+        #expect(!state.accepts(deletedHere) && !state.accepts(deletedThere))
+
+        state.accountID = "_abc"
+        state.forgetServer()
+        #expect(state.accountID == nil && state.uploaded.isEmpty && state.pendingDeletions.isEmpty && state.remoteDeletions.isEmpty)
     }
 
     @Test func isOnByDefaultAndRemembersTheChoice() throws {

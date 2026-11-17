@@ -11,15 +11,21 @@ protocol LibraryObserver: AnyObject {
 }
 
 /// What `LibrarySync` remembers between launches. Kept in its own file next to the library, and
-/// deleted when the library is reset, so a fresh library downloads everything again.
+/// deleted when the library is reset, so a fresh library downloads everything again. Images are
+/// identified by their record names (the image's UUID).
 nonisolated struct LibrarySyncState: Codable {
     /// `CKSyncEngine`'s own state: what it has fetched, and the changes it still has to send.
     var engineState: CKSyncEngine.State.Serialization?
+    /// The iCloud account (user record name) this library syncs with.
+    var accountID: String?
     var zoneCreated = false
-    /// Images known to be in iCloud (record names), so the library's other images can be uploaded.
+    /// Images known to be in iCloud, so the library's other images can be uploaded.
     var uploaded: Set<String> = []
-    /// Images deleted while syncing was off that are in iCloud, deleted there when it's turned on.
-    var pausedDeletions: Set<String> = []
+    /// Images deleted on this device, until iCloud confirms they're gone there too. Kept here rather
+    /// than only in the engine, so a deletion survives syncing being off, a relaunch or a failure.
+    var pendingDeletions: Set<String> = []
+    /// Images deleted in iCloud that couldn't be removed here yet. Never uploaded again.
+    var remoteDeletions: Set<String> = []
     /// Images that arrived but couldn't be added (e.g. the disk was full), fetched again later.
     var failedDownloads: Set<String> = []
 
@@ -35,17 +41,27 @@ nonisolated struct LibrarySyncState: Codable {
         try JSONEncoder().encode(self).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
-    /// The local images iCloud doesn't have yet.
-    func notUploaded(_ ids: [UUID]) -> [UUID] {
-        ids.filter { !uploaded.contains($0.uuidString) }
+    /// The local images that should be uploaded: not in iCloud, and not on their way out.
+    func toUpload(_ ids: [UUID]) -> [UUID] {
+        ids.filter {
+            let name = $0.uuidString
+            return !uploaded.contains(name) && !pendingDeletions.contains(name) && !remoteDeletions.contains(name)
+        }
     }
 
-    /// Forgets everything about iCloud's contents, e.g. after a change of account.
+    /// Whether an image arriving from iCloud should be added: not deleted here in the meantime.
+    func accepts(_ id: UUID) -> Bool {
+        !pendingDeletions.contains(id.uuidString) && !remoteDeletions.contains(id.uuidString)
+    }
+
+    /// Forgets everything about an iCloud account's contents, for syncing with a different one.
     mutating func forgetServer() {
         engineState = nil
+        accountID = nil
         zoneCreated = false
         uploaded = []
-        pausedDeletions = []
+        pendingDeletions = []
+        remoteDeletions = []
         failedDownloads = []
     }
 }
@@ -56,6 +72,10 @@ nonisolated struct LibrarySyncState: Codable {
 /// into the library, and deletions go both ways. Pending generations, the prompt box and the API
 /// key stay on this device. Turning sync off pauses it: images deleted in the meantime are
 /// deleted from iCloud when it's turned back on, and new ones are uploaded.
+///
+/// Nothing is sent until the signed-in account is known to be the one this library syncs with. If
+/// it's a different one, syncing turns off rather than copy the library into that account; turning
+/// it back on agrees to sync with the account signed in at the time.
 @Observable
 final class LibrarySync: LibraryObserver {
     enum Status: Equatable {
@@ -75,7 +95,12 @@ final class LibrarySync: LibraryObserver {
             guard isEnabled != oldValue else { return }
             defaults.set(isEnabled, forKey: Self.enabledKey)
             notice = nil
-            if isEnabled { start() } else { stop() }
+            if isEnabled {
+                approvesAccountChange = true
+                start()
+            } else {
+                stop()
+            }
         }
     }
 
@@ -87,11 +112,24 @@ final class LibrarySync: LibraryObserver {
     @ObservationIgnored private var state: LibrarySyncState
     @ObservationIgnored private var engine: CKSyncEngine?
     @ObservationIgnored private var accountObserver: (any NSObjectProtocol)?
+    /// The signed-in account is the one this library syncs with, so changes may be sent.
+    @ObservationIgnored private var accountConfirmed = false
+    /// The user turned syncing on, agreeing to sync with whichever account is signed in.
+    @ObservationIgnored private var approvesAccountChange = false
+
+    // What the status is worked out from.
+    @ObservationIgnored private var accountProblem: String?
+    @ObservationIgnored private var syncError: String?
+    @ObservationIgnored private var isBusy = false
+    @ObservationIgnored private var hasFetched = false
 
     private static let log = Logger(subsystem: "com.eyeb0l.ImageStudio", category: "LibrarySync")
     static let enabledKey = "iCloudSyncEnabled"
+    static let signedOutMessage = "Sign in to iCloud in the Settings app to sync your library."
+    static let accountChangedNotice = "Your iCloud account changed, so iCloud Sync was turned off rather than copy this library into a different account. Turn it on to sync with the account you're signed in to now."
 
     private var context: ModelContext { container.mainContext }
+    private var canSend: Bool { engine != nil && accountConfirmed }
 
     /// `usesCloudKit: false` keeps everything local, for unit tests (which host the app).
     init(studio: Studio, container: ModelContainer, defaults: UserDefaults = .standard,
@@ -115,22 +153,17 @@ final class LibrarySync: LibraryObserver {
 
     private func start() {
         guard engine == nil else { return }
-        status = .syncing
+        accountConfirmed = false
+        accountProblem = nil
+        syncError = nil
+        hasFetched = false
+        isBusy = false
+        refreshStatus()
         guard usesCloudKit else { return }
 
         let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
-        let configuration = CKSyncEngine.Configuration(database: cloud.privateCloudDatabase,
-                                                       stateSerialization: state.engineState, delegate: self)
-        engine = CKSyncEngine(configuration)
-
-        // Deletions made while syncing was off.
-        if !state.pausedDeletions.isEmpty {
-            let ids = state.pausedDeletions.compactMap(UUID.init(uuidString:))
-            state.pausedDeletions = []
-            queueDeletions(ids)
-        }
-        queueLocalImages()
-
+        engine = CKSyncEngine(CKSyncEngine.Configuration(database: cloud.privateCloudDatabase,
+                                                         stateSerialization: state.engineState, delegate: self))
         if accountObserver == nil {
             accountObserver = NotificationCenter.default.addObserver(forName: .CKAccountChanged, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.checkAccount() }
@@ -142,60 +175,99 @@ final class LibrarySync: LibraryObserver {
     private func stop() {
         let stopping = engine
         engine = nil
-        status = .off
+        accountConfirmed = false
+        refreshStatus()
         if let stopping { Task { await stopping.cancelOperations() } }
     }
 
-    /// Picks up anything missed: images iCloud doesn't have, and downloads that failed. Cheap when
-    /// there's nothing to do; `CKSyncEngine` fetches by itself when told of changes.
-    func appBecameActive() {
-        guard engine != nil else { return }
-        queueLocalImages()
-        retryFailedDownloads()
+    private func restart() {
+        stop()
+        start()
     }
 
+    /// Picks up anything missed: images iCloud doesn't have, deletions still to make, and downloads
+    /// that failed. Cheap when there's nothing to do; `CKSyncEngine` fetches by itself.
+    func appBecameActive() {
+        sendOutstandingWork()
+    }
+
+    /// Checks which account is signed in before anything is sent to it.
     private func checkAccount() {
-        guard usesCloudKit else { return }
+        guard usesCloudKit, let current = engine else { return }
+        accountConfirmed = false
         Task {
+            let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
+            let problem: String?
+            var userID: String?
             do {
-                let accountStatus = try await CKContainer(identifier: LibraryRecord.containerIdentifier).accountStatus()
-                guard engine != nil else { return }
-                switch accountStatus {
+                switch try await cloud.accountStatus() {
                 case .available:
-                    if case .unavailable = status { status = .syncing }
-                    updateIdleStatus()
-                case .noAccount:
-                    status = .unavailable("Sign in to iCloud in the Settings app to sync your library.")
-                case .restricted:
-                    status = .unavailable("iCloud is restricted on this device.")
-                case .temporarilyUnavailable:
-                    status = .unavailable("iCloud is temporarily unavailable. Check your Apple Account in the Settings app.")
-                case .couldNotDetermine:
-                    status = .unavailable("Couldn't check your iCloud account.")
-                @unknown default:
-                    status = .unavailable("Couldn't check your iCloud account.")
+                    userID = try await cloud.userRecordID().recordName
+                    problem = nil
+                case .noAccount: problem = Self.signedOutMessage
+                case .restricted: problem = "iCloud is restricted on this device."
+                case .temporarilyUnavailable: problem = "iCloud is temporarily unavailable. Check your Apple Account in the Settings app."
+                case .couldNotDetermine: problem = "Couldn't check your iCloud account."
+                @unknown default: problem = "Couldn't check your iCloud account."
                 }
             } catch {
-                status = .unavailable("Couldn't check your iCloud account: \(error.localizedDescription)")
+                problem = "Couldn't check your iCloud account: \(error.localizedDescription)"
             }
+            guard current === engine else { return }
+            accountProblem = problem
+            if let userID { confirmAccount(userID) } else { refreshStatus() }
         }
+    }
+
+    private func confirmAccount(_ userID: String) {
+        if let known = state.accountID, known != userID {
+            guard approvesAccountChange else {
+                // Kept as it was, in case the previous account comes back.
+                Self.log.notice("The iCloud account changed; turning sync off until it's turned back on")
+                isEnabled = false
+                notice = Self.accountChangedNotice
+                return
+            }
+            Self.log.notice("Syncing with a different iCloud account, as agreed")
+            state.forgetServer()
+            state.accountID = userID
+            persist()
+            restart()
+            return
+        }
+        approvesAccountChange = false
+        if state.accountID == nil {
+            state.accountID = userID
+            persist()
+        }
+        accountConfirmed = true
+        refreshStatus()
+        sendOutstandingWork()
     }
 
     // MARK: Local changes
 
     func imagesAdded(_ ids: [UUID]) {
-        guard engine != nil else { return }
-        queueUploads(state.notUploaded(ids))
+        guard canSend else { return }  // Picked up once it can send.
+        queueUploads(state.toUpload(ids))
     }
 
     func imagesDeleted(_ ids: [UUID]) {
-        guard engine != nil else {
-            // Remembered so other devices delete them too once syncing is back on.
-            state.pausedDeletions.formUnion(ids.map(\.uuidString).filter(state.uploaded.contains))
-            persist()
-            return
-        }
-        queueDeletions(ids)
+        guard !ids.isEmpty else { return }
+        // Recorded first, whatever happens next, so the deletion reaches iCloud eventually.
+        state.pendingDeletions.formUnion(ids.map(\.uuidString))
+        persist()
+        if canSend { queueDeletions(ids) }
+    }
+
+    /// Everything this device still owes iCloud, and what it still has to do with iCloud's changes.
+    private func sendOutstandingWork() {
+        guard canSend else { return }
+        retryRemoteDeletions()
+        queueDeletions(state.pendingDeletions.compactMap(UUID.init(uuidString:)))
+        queueLocalImages()
+        retryFailedDownloads()
+        refreshStatus()
     }
 
     /// Queues an upload for every library image iCloud doesn't have yet.
@@ -203,15 +275,14 @@ final class LibrarySync: LibraryObserver {
         do {
             var descriptor = FetchDescriptor<GeneratedImage>()
             descriptor.propertiesToFetch = [\.id]
-            let ids = try context.fetch(descriptor).map(\.id)
-            queueUploads(state.notUploaded(ids))
+            queueUploads(state.toUpload(try context.fetch(descriptor).map(\.id)))
         } catch {
             Self.log.error("Couldn't list images to upload: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func queueUploads(_ ids: [UUID]) {
-        guard let engine, !ids.isEmpty else { return }
+        guard canSend, let engine, !ids.isEmpty else { return }
         if !state.zoneCreated {
             engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: LibraryRecord.zoneID))])
         }
@@ -219,10 +290,18 @@ final class LibrarySync: LibraryObserver {
     }
 
     private func queueDeletions(_ ids: [UUID]) {
-        guard let engine, !ids.isEmpty else { return }
+        guard canSend, let engine, !ids.isEmpty else { return }
         let recordIDs = ids.map(LibraryRecord.recordID(for:))
         engine.state.remove(pendingRecordZoneChanges: recordIDs.map { .saveRecord($0) })
         engine.state.add(pendingRecordZoneChanges: recordIDs.map { .deleteRecord($0) })
+    }
+
+    /// Removes images deleted in iCloud whose removal here failed before.
+    private func retryRemoteDeletions() {
+        guard !state.remoteDeletions.isEmpty else { return }
+        let remaining = studio.removeSyncedImages(ids: state.remoteDeletions.compactMap(UUID.init(uuidString:)))
+        state.remoteDeletions = Set(remaining.map(\.uuidString))
+        persist()
     }
 
     // MARK: Engine events
@@ -253,25 +332,29 @@ final class LibrarySync: LibraryObserver {
             }
             for failure in changes.failedZoneSaves {
                 Self.log.error("Couldn't create the iCloud zone: \(failure.error.localizedDescription, privacy: .public)")
-                status = .failed("Couldn't set up iCloud: \(failure.error.localizedDescription)")
+                syncError = "Couldn't set up iCloud: \(failure.error.localizedDescription)"
             }
 
         case .sentRecordZoneChanges(let changes):
             handleSent(changes)
 
         case .willFetchChanges, .willSendChanges:
-            if status != .off, !isUnavailable { status = .syncing }
+            isBusy = true
 
         case .didFetchChanges:
+            isBusy = false
+            hasFetched = true
             retryFailedDownloads()
-            updateIdleStatus()
 
         case .didSendChanges:
-            updateIdleStatus()
+            isBusy = false
 
         case .didFetchRecordZoneChanges(let result):
             if let error = result.error {
                 Self.log.error("Fetching changes failed: \(error.localizedDescription, privacy: .public)")
+                syncError = "Couldn't download changes from iCloud: \(error.localizedDescription)"
+            } else if syncError?.hasPrefix("Couldn't download") == true {
+                syncError = nil
             }
 
         case .willFetchRecordZoneChanges:
@@ -280,43 +363,39 @@ final class LibrarySync: LibraryObserver {
         @unknown default:
             break
         }
+        refreshStatus()
     }
 
-    private var isUnavailable: Bool {
-        if case .unavailable = status { true } else { false }
-    }
-
-    private func updateIdleStatus() {
-        guard let engine, !isUnavailable else { return }
-        if case .failed = status { return }
-        if engine.state.pendingRecordZoneChanges.isEmpty && engine.state.pendingDatabaseChanges.isEmpty {
-            status = .upToDate
+    private func refreshStatus() {
+        status = if !isEnabled {
+            .off
+        } else if let accountProblem {
+            .unavailable(accountProblem)
+        } else if let syncError {
+            .failed(syncError)
+        } else if !state.failedDownloads.isEmpty {
+            .failed("Some images couldn't be downloaded. Image Studio will try again.")
+        } else if let engine, accountConfirmed, hasFetched, !isBusy,
+                  engine.state.pendingRecordZoneChanges.isEmpty, engine.state.pendingDatabaseChanges.isEmpty {
+            .upToDate
+        } else {
+            .syncing
         }
     }
 
     private func handleAccountChange(_ change: CKSyncEngine.Event.AccountChange.ChangeType) {
         switch change {
-        case .signIn:
-            status = .syncing
-            queueLocalImages()
+        case .signIn, .switchAccounts:
+            // Nothing is sent until the account is checked against the one this library syncs with.
+            checkAccount()
         case .signOut:
-            // The library stays on this device; it's synced to whichever account signs in next.
-            restartEngine()
-            status = .unavailable("Sign in to iCloud in the Settings app to sync your library.")
-        case .switchAccounts:
-            restartEngine()
-            queueLocalImages()
+            // The library stays on this device, and remembers its account in case it signs back in.
+            state.engineState = nil
+            persist()
+            restart()
         @unknown default:
-            break
+            checkAccount()
         }
-    }
-
-    /// Starts again with no knowledge of iCloud's contents, e.g. for a different account.
-    private func restartEngine() {
-        state.forgetServer()
-        persist()
-        stop()
-        start()
     }
 
     private func handleZoneDeletion(_ reason: CKDatabase.DatabaseChange.Deletion.Reason) {
@@ -326,6 +405,7 @@ final class LibrarySync: LibraryObserver {
             Self.log.notice("iCloud's encrypted data was reset; uploading the library again")
             state.zoneCreated = false
             state.uploaded = []
+            state.pendingDeletions = []
             persist()
             queueLocalImages()
         default:
@@ -339,30 +419,43 @@ final class LibrarySync: LibraryObserver {
     }
 
     private func apply(_ changes: CKSyncEngine.Event.FetchedRecordZoneChanges) {
+        let deleted = changes.deletions
+            .filter { $0.recordType == LibraryRecord.recordType }
+            .compactMap { LibraryRecord.imageID(of: $0.recordID) }
+        let deletedNames = Set(deleted.map(\.uuidString))
+
         let images = changes.modifications.compactMap { modification -> SyncedImage? in
             guard let image = LibraryRecord.decode(modification.record) else {
                 Self.log.error("Skipped an unreadable iCloud record: \(modification.record.recordID.recordName, privacy: .public)")
                 return nil
             }
             return image
-        }
+        }.filter { state.accepts($0.id) && !deletedNames.contains($0.id.uuidString) }
         let result = studio.addSyncedImages(images)
         state.uploaded.formUnion(result.present.map(\.uuidString))
+        state.uploaded.formUnion(result.failed.map(\.uuidString))
         state.failedDownloads.subtract(result.present.map(\.uuidString))
         state.failedDownloads.formUnion(result.failed.map(\.uuidString))
 
-        let deleted = changes.deletions
-            .filter { $0.recordType == LibraryRecord.recordType }
-            .compactMap { LibraryRecord.imageID(of: $0.recordID) }
-        studio.removeSyncedImages(ids: deleted)
-        state.uploaded.subtract(deleted.map(\.uuidString))
-        state.failedDownloads.subtract(deleted.map(\.uuidString))
+        if !deleted.isEmpty {
+            // Gone from iCloud, so nothing is owed there; any queued upload is cancelled.
+            engine?.state.remove(pendingRecordZoneChanges: deleted.map { .saveRecord(LibraryRecord.recordID(for: $0)) })
+            state.uploaded.subtract(deletedNames)
+            state.failedDownloads.subtract(deletedNames)
+            state.pendingDeletions.subtract(deletedNames)
+            // Kept until removed here, so a failure can't make them look like new images to upload.
+            state.remoteDeletions.formUnion(deletedNames)
+            let remaining = Set(studio.removeSyncedImages(ids: deleted).map(\.uuidString))
+            state.remoteDeletions.subtract(deletedNames.subtracting(remaining))
+        }
         persist()
     }
 
     private func handleSent(_ changes: CKSyncEngine.Event.SentRecordZoneChanges) {
         state.uploaded.formUnion(changes.savedRecords.compactMap { LibraryRecord.imageID(of: $0.recordID)?.uuidString })
-        state.uploaded.subtract(changes.deletedRecordIDs.map(\.recordName))
+        let deleted = Set(changes.deletedRecordIDs.map(\.recordName))
+        state.uploaded.subtract(deleted)
+        state.pendingDeletions.subtract(deleted)
 
         var retry: [UUID] = []
         for failure in changes.failedRecordSaves {
@@ -376,7 +469,7 @@ final class LibrarySync: LibraryObserver {
                 retry.append(id)
             case .quotaExceeded:
                 // Tried again when the app is next opened.
-                status = .failed("Your iCloud storage is full, so some images haven't been uploaded.")
+                syncError = "Your iCloud storage is full, so some images haven't been uploaded."
             case .networkFailure, .networkUnavailable, .zoneBusy, .serviceUnavailable, .requestRateLimited,
                  .notAuthenticated, .operationCancelled:
                 // `CKSyncEngine` retries these itself.
@@ -385,9 +478,18 @@ final class LibrarySync: LibraryObserver {
                 Self.log.error("Couldn't upload \(id, privacy: .public): \(failure.error.localizedDescription, privacy: .public)")
             }
         }
-        for (recordID, error) in changes.failedRecordDeletes where error.code == .unknownItem {
-            // Never made it to iCloud, or already deleted.
-            state.uploaded.remove(recordID.recordName)
+        for (recordID, error) in changes.failedRecordDeletes {
+            if error.code == .unknownItem {
+                // Never made it to iCloud, or already deleted.
+                state.uploaded.remove(recordID.recordName)
+                state.pendingDeletions.remove(recordID.recordName)
+            } else {
+                // Still in `pendingDeletions`, so it's queued again when the app is next opened.
+                Self.log.error("Couldn't delete \(recordID.recordName, privacy: .public) from iCloud: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if syncError?.hasPrefix("Your iCloud storage") == true, changes.failedRecordSaves.isEmpty, !changes.savedRecords.isEmpty {
+            syncError = nil
         }
         persist()
         queueUploads(retry)
@@ -395,7 +497,7 @@ final class LibrarySync: LibraryObserver {
 
     /// Fetches records again whose images couldn't be added when they first arrived.
     private func retryFailedDownloads() {
-        guard let engine, !state.failedDownloads.isEmpty else { return }
+        guard canSend, let engine, !state.failedDownloads.isEmpty else { return }
         let recordIDs = state.failedDownloads.map { CKRecord.ID(recordName: $0, zoneID: LibraryRecord.zoneID) }
         Task {
             guard let results = try? await engine.database.records(for: recordIDs) else { return }
@@ -409,10 +511,13 @@ final class LibrarySync: LibraryObserver {
                 case .failure: break
                 }
             }
-            let result = studio.addSyncedImages(records.compactMap(LibraryRecord.decode))
-            state.uploaded.formUnion(result.present.map(\.uuidString))
+            // Only what's still wanted: the image may have been deleted while this was fetched.
+            let wanted = records.compactMap(LibraryRecord.decode)
+                .filter { state.failedDownloads.contains($0.id.uuidString) && state.accepts($0.id) }
+            let result = studio.addSyncedImages(wanted)
             state.failedDownloads.subtract(result.present.map(\.uuidString))
             persist()
+            refreshStatus()
         }
     }
 
@@ -426,15 +531,20 @@ final class LibrarySync: LibraryObserver {
 
     /// The images the engine asked for, read from the library when it's ready to send them.
     private func record(for recordID: CKRecord.ID, engine syncEngine: CKSyncEngine) -> CKRecord? {
-        guard let id = LibraryRecord.imageID(of: recordID) else { return nil }
+        guard let id = LibraryRecord.imageID(of: recordID), syncEngine === engine, accountConfirmed else { return nil }
         let image = try? context.fetch(FetchDescriptor<GeneratedImage>(predicate: #Predicate { $0.id == id })).first
-        guard let image, let record = LibraryRecord.record(for: image) else {
+        guard let image, state.accepts(id), let record = LibraryRecord.record(for: image) else {
             // Deleted since, or its file is missing: nothing to upload.
             syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
             return nil
         }
         return record
     }
+
+    #if DEBUG
+    /// For tests: what's remembered between launches.
+    var persistedState: LibrarySyncState { state }
+    #endif
 }
 
 extension LibrarySync: CKSyncEngineDelegate {

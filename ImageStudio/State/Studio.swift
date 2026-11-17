@@ -491,8 +491,11 @@ final class Studio {
 
     /// Adds images that arrived from iCloud. Each image's file, and any reference and markup files
     /// that came with it, are copied into place before its record is inserted, and all records are
-    /// saved at once. Images already in the library are left alone, as images never change.
-    /// Returns the IDs that are now in the library and those that couldn't be added.
+    /// saved at once. Images already in the library keep their record, as images never change, but
+    /// get back any reference or markup file they're missing.
+    ///
+    /// Returns the IDs that are now complete in the library, and those to deliver again: not added,
+    /// or added without a reference or markup file that came with them.
     func addSyncedImages(
         _ images: [SyncedImage],
         installFile: (URL, URL) throws -> Bool = Studio.copyIfMissing
@@ -506,60 +509,100 @@ final class Studio {
             Self.log.error("Couldn't look up synced images: \(error.localizedDescription, privacy: .public)")
             return ([], ids)
         }
-        var present = images.map(\.id).filter(existing.contains)
+        var present: [UUID] = []
         var failed: [UUID] = []
-        var inserted: [GeneratedImage] = []
+        var inserted: [(record: GeneratedImage, complete: Bool)] = []
         var copiedImageFiles: [String] = []
+        var claimedFileNames: Set<String> = []
 
-        for image in images where !existing.contains(image.id) && !inserted.contains(where: { $0.id == image.id }) {
-            do {
-                if try installFile(image.file, ImageStore.url(for: image.fileName)) {
-                    copiedImageFiles.append(image.fileName)
+        /// Copies the files for `ReferenceStore`. Returns whether all of them are in place.
+        func installStoreFiles(of image: SyncedImage) -> Bool {
+            var complete = true
+            for (name, source) in image.storeFiles {
+                do { _ = try installFile(source, ReferenceStore.url(for: name)) } catch {
+                    Self.log.error("Couldn't copy synced reference \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    complete = false
                 }
-                for (name, source) in image.storeFiles {
-                    // A missing reference only shows as missing, so it doesn't stop the image.
-                    do { _ = try installFile(source, ReferenceStore.url(for: name)) } catch {
-                        Self.log.error("Couldn't copy synced reference \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    }
+            }
+            return complete
+        }
+
+        for image in images {
+            if existing.contains(image.id) {
+                if installStoreFiles(of: image) { present.append(image.id) } else { failed.append(image.id) }
+                continue
+            }
+            guard !inserted.contains(where: { $0.record.id == image.id }) else { continue }
+            let fileName = localFileName(for: image, claimed: claimedFileNames)
+            do {
+                if try installFile(image.file, ImageStore.url(for: fileName)) {
+                    copiedImageFiles.append(fileName)
                 }
             } catch {
-                Self.log.error("Couldn't copy synced image \(image.fileName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                Self.log.error("Couldn't copy synced image \(fileName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 failed.append(image.id)
                 continue
             }
+            claimedFileNames.insert(fileName)
             let record = GeneratedImage(synced: image)
+            record.fileName = fileName
             context.insert(record)
-            inserted.append(record)
+            // An image missing a reference is still added, and delivered again to fill the gap.
+            inserted.append((record, installStoreFiles(of: image)))
         }
 
         guard !inserted.isEmpty else { return (present, failed) }
         do {
             try context.save()
-            present += inserted.map(\.id)
+            present += inserted.filter(\.complete).map(\.record.id)
+            failed += inserted.filter { !$0.complete }.map(\.record.id)
         } catch {
             Self.log.error("Couldn't save synced images: \(error.localizedDescription, privacy: .public)")
-            for record in inserted { context.delete(record) }
+            for item in inserted { context.delete(item.record) }
             for name in copiedImageFiles { try? ImageStore.delete(fileName: name) }
-            failed += inserted.map(\.id)
+            failed += inserted.map(\.record.id)
         }
         return (present, failed)
     }
 
+    /// Where a synced image's file goes. Usually the name it had on the other device; a file already
+    /// there is reused only if it's this image's (left behind by a library reset). If the name is
+    /// taken by another image, which two devices could pick by chance, it gets one of its own, so
+    /// every image owns its file and deleting one never removes another's.
+    private func localFileName(for image: SyncedImage, claimed: Set<String>) -> String {
+        let name = image.fileName
+        let usedByAnother = claimed.contains(name)
+            || ((try? context.fetchCount(FetchDescriptor<GeneratedImage>(predicate: #Predicate { $0.fileName == name }))) ?? 1) > 0
+        let url = ImageStore.url(for: name)
+        let leftOver = FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+        let isThisImage = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize == image.fileSize
+        return usedByAnother || (leftOver && !isThisImage) ? Self.uniqueFileName(for: image) : name
+    }
+
+    nonisolated static func uniqueFileName(for image: SyncedImage) -> String {
+        let source = URL(filePath: image.fileName)
+        let stem = source.deletingPathExtension().lastPathComponent
+        return "\(stem)-\(image.id.uuidString).\(source.pathExtension)"
+    }
+
     /// Removes images that were deleted on another device, with their files and any reference files
-    /// nothing else uses.
-    func removeSyncedImages(ids: [UUID]) {
-        guard !ids.isEmpty else { return }
+    /// nothing else uses. Returns the IDs still in the library because removing them failed.
+    @discardableResult
+    func removeSyncedImages(ids: [UUID]) -> [UUID] {
+        guard !ids.isEmpty else { return [] }
         let images: [GeneratedImage]
         do {
             images = try context.fetch(FetchDescriptor<GeneratedImage>(predicate: #Predicate { ids.contains($0.id) }))
         } catch {
             Self.log.error("Couldn't look up synced deletions: \(error.localizedDescription, privacy: .public)")
-            return
+            return ids
         }
-        guard !images.isEmpty else { return }
+        guard !images.isEmpty else { return [] }
+        let found = images.map(\.id)
         let references = images.flatMap(\.referenceStoreFileNames)
         if let problem = Self.deleteImages(images, in: context) { alertMessage = problem }
         releaseReferences(references)
+        return existingImageIDs(among: found)
     }
 
     /// Copies a file unless the destination already has one. Returns whether it copied.
