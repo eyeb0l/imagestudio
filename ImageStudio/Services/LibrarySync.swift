@@ -54,14 +54,20 @@ nonisolated struct LibrarySyncState: Codable {
         !pendingDeletions.contains(id.uuidString) && !remoteDeletions.contains(id.uuidString)
     }
 
+    /// Images that were in iCloud and aren't in the library any more, so are owed a deletion there.
+    /// Covers a deletion whose record in `pendingDeletions` never reached disk.
+    func deletedLocally(library: [UUID]) -> Set<String> {
+        uploaded.subtracting(library.map(\.uuidString)).subtracting(failedDownloads).subtracting(remoteDeletions)
+    }
+
     /// Forgets everything about an iCloud account's contents, for syncing with a different one.
+    /// `remoteDeletions` stays: those images are still to be removed from this library.
     mutating func forgetServer() {
         engineState = nil
         accountID = nil
         zoneCreated = false
         uploaded = []
         pendingDeletions = []
-        remoteDeletions = []
         failedDownloads = []
     }
 }
@@ -114,8 +120,11 @@ final class LibrarySync: LibraryObserver {
     @ObservationIgnored private var accountObserver: (any NSObjectProtocol)?
     /// The signed-in account is the one this library syncs with, so changes may be sent.
     @ObservationIgnored private var accountConfirmed = false
-    /// The user turned syncing on, agreeing to sync with whichever account is signed in.
+    /// The user turned syncing on, agreeing to sync with whichever account is signed in. Lasts only
+    /// until the next account check, so it can't apply to an account that signs in later.
     @ObservationIgnored private var approvesAccountChange = false
+    /// The engine whose account is being checked, so there's one check at a time for each.
+    @ObservationIgnored private weak var checkingEngine: CKSyncEngine?
 
     // What the status is worked out from.
     @ObservationIgnored private var accountProblem: String?
@@ -188,13 +197,15 @@ final class LibrarySync: LibraryObserver {
     /// Picks up anything missed: images iCloud doesn't have, deletions still to make, and downloads
     /// that failed. Cheap when there's nothing to do; `CKSyncEngine` fetches by itself.
     func appBecameActive() {
+        if engine != nil, !accountConfirmed { checkAccount() }
         sendOutstandingWork()
     }
 
     /// Checks which account is signed in before anything is sent to it.
     private func checkAccount() {
-        guard usesCloudKit, let current = engine else { return }
+        guard usesCloudKit, let current = engine, checkingEngine !== current else { return }
         accountConfirmed = false
+        checkingEngine = current
         Task {
             let cloud = CKContainer(identifier: LibraryRecord.containerIdentifier)
             let problem: String?
@@ -213,9 +224,16 @@ final class LibrarySync: LibraryObserver {
             } catch {
                 problem = "Couldn't check your iCloud account: \(error.localizedDescription)"
             }
+            if checkingEngine === current { checkingEngine = nil }
             guard current === engine else { return }
             accountProblem = problem
-            if let userID { confirmAccount(userID) } else { refreshStatus() }
+            if let userID {
+                confirmAccount(userID)
+            } else {
+                // Agreeing to sync applies to the account signed in now, not one that signs in later.
+                approvesAccountChange = false
+                refreshStatus()
+            }
         }
     }
 
@@ -254,8 +272,10 @@ final class LibrarySync: LibraryObserver {
 
     func imagesDeleted(_ ids: [UUID]) {
         guard !ids.isEmpty else { return }
-        // Recorded first, whatever happens next, so the deletion reaches iCloud eventually.
+        // Recorded first, whatever happens next, so the deletion reaches iCloud eventually. A download
+        // still being retried is dropped, so it can't bring the image back.
         state.pendingDeletions.formUnion(ids.map(\.uuidString))
+        state.failedDownloads.subtract(ids.map(\.uuidString))
         persist()
         if canSend { queueDeletions(ids) }
     }
@@ -264,21 +284,31 @@ final class LibrarySync: LibraryObserver {
     private func sendOutstandingWork() {
         guard canSend else { return }
         retryRemoteDeletions()
-        queueDeletions(state.pendingDeletions.compactMap(UUID.init(uuidString:)))
         queueLocalImages()
+        queueDeletions(state.pendingDeletions.compactMap(UUID.init(uuidString:)))
         retryFailedDownloads()
         refreshStatus()
     }
 
-    /// Queues an upload for every library image iCloud doesn't have yet.
+    /// Queues an upload for every library image iCloud doesn't have yet, and finds images deleted
+    /// here whose deletion was never recorded (e.g. the state file couldn't be written).
     private func queueLocalImages() {
+        let library: [UUID]
         do {
             var descriptor = FetchDescriptor<GeneratedImage>()
             descriptor.propertiesToFetch = [\.id]
-            queueUploads(state.toUpload(try context.fetch(descriptor).map(\.id)))
+            library = try context.fetch(descriptor).map(\.id)
         } catch {
+            // Without the library there's no telling what's missing, so nothing is inferred.
             Self.log.error("Couldn't list images to upload: \(error.localizedDescription, privacy: .public)")
+            return
         }
+        let missing = state.deletedLocally(library: library).subtracting(state.pendingDeletions)
+        if !missing.isEmpty {
+            state.pendingDeletions.formUnion(missing)
+            persist()
+        }
+        queueUploads(state.toUpload(library))
     }
 
     private func queueUploads(_ ids: [UUID]) {
@@ -376,6 +406,7 @@ final class LibrarySync: LibraryObserver {
         } else if !state.failedDownloads.isEmpty {
             .failed("Some images couldn't be downloaded. Image Studio will try again.")
         } else if let engine, accountConfirmed, hasFetched, !isBusy,
+                  state.pendingDeletions.isEmpty, state.remoteDeletions.isEmpty,
                   engine.state.pendingRecordZoneChanges.isEmpty, engine.state.pendingDatabaseChanges.isEmpty {
             .upToDate
         } else {

@@ -566,7 +566,7 @@ final class Studio {
     }
 
     /// Where a synced image's file goes. Usually the name it had on the other device; a file already
-    /// there is reused only if it's this image's (left behind by a library reset). If the name is
+    /// there is reused only if it's identical (left behind by a library reset). If the name is
     /// taken by another image, which two devices could pick by chance, it gets one of its own, so
     /// every image owns its file and deleting one never removes another's.
     private func localFileName(for image: SyncedImage, claimed: Set<String>) -> String {
@@ -574,8 +574,9 @@ final class Studio {
         let usedByAnother = claimed.contains(name)
             || ((try? context.fetchCount(FetchDescriptor<GeneratedImage>(predicate: #Predicate { $0.fileName == name }))) ?? 1) > 0
         let url = ImageStore.url(for: name)
-        let leftOver = FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
-        let isThisImage = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize == image.fileSize
+        let path = url.path(percentEncoded: false)
+        let leftOver = FileManager.default.fileExists(atPath: path)
+        let isThisImage = leftOver && FileManager.default.contentsEqual(atPath: path, andPath: image.file.path(percentEncoded: false))
         return usedByAnother || (leftOver && !isThisImage) ? Self.uniqueFileName(for: image) : name
     }
 

@@ -281,12 +281,13 @@ struct LibrarySyncApplyTests {
         #expect(try Data(contentsOf: ImageStore.url(for: secondName)) == Data("OTHER IMAGE".utf8))
     }
 
-    @Test func doesNotReuseALeftOverFileOfAnotherSize() throws {
+    @Test(arguments: ["SOMETHING ELSE ENTIRELY", "OTHER"])  // A different size, and the same size.
+    func doesNotReuseADifferentLeftOverFile(leftOver: String) throws {
         let container = try makeContainer()
         let studio = makeStudio(container: container)
         let directory = try temporaryDirectory()
         let image = try syncedImage(in: directory)
-        try Data("SOMETHING ELSE ENTIRELY".utf8).write(to: ImageStore.url(for: image.fileName))
+        try Data(leftOver.utf8).write(to: ImageStore.url(for: image.fileName))
         defer {
             try? FileManager.default.removeItem(at: directory)
             for name in [image.fileName, Studio.uniqueFileName(for: image)] { try? ImageStore.delete(fileName: name) }
@@ -427,6 +428,8 @@ struct LibrarySyncStateTests {
         let (uploaded, inFlight) = (UUID(), UUID())
         var state = LibrarySyncState()
         state.uploaded = [uploaded.uuidString]
+        // A download being retried for it mustn't bring it back.
+        state.failedDownloads = [inFlight.uuidString]
         try state.save(to: url)
         let defaults = try #require(UserDefaults(suiteName: "LibrarySyncTests-\(UUID().uuidString)"))
         defaults.set(false, forKey: LibrarySync.enabledKey)
@@ -441,7 +444,26 @@ struct LibrarySyncStateTests {
 
         let saved = LibrarySyncState.load(from: url)
         #expect(saved.pendingDeletions == [uploaded.uuidString, inFlight.uuidString])
+        #expect(saved.failedDownloads.isEmpty)
         #expect(saved.toUpload([uploaded, inFlight]).isEmpty)
+    }
+
+    @Test func infersDeletionsThatWereNeverRecorded() {
+        let (kept, deleted, downloading, removing) = (UUID(), UUID(), UUID(), UUID())
+        var state = LibrarySyncState()
+        state.uploaded = Set([kept, deleted, downloading, removing].map(\.uuidString))
+        state.failedDownloads = [downloading.uuidString]
+        state.remoteDeletions = [removing.uuidString]
+
+        // Only `kept` is in the library: `deleted` went without its deletion reaching the state file.
+        #expect(state.deletedLocally(library: [kept]) == [deleted.uuidString])
+    }
+
+    @Test func aNewAccountStillRemovesWhatWasDeletedInICloud() {
+        var state = LibrarySyncState()
+        state.remoteDeletions = ["gone-in-icloud"]
+        state.forgetServer()
+        #expect(state.remoteDeletions == ["gone-in-icloud"])
     }
 
     @Test func neverUploadsOrAcceptsImagesOnTheirWayOut() {
@@ -457,7 +479,7 @@ struct LibrarySyncStateTests {
 
         state.accountID = "_abc"
         state.forgetServer()
-        #expect(state.accountID == nil && state.uploaded.isEmpty && state.pendingDeletions.isEmpty && state.remoteDeletions.isEmpty)
+        #expect(state.accountID == nil && state.uploaded.isEmpty && state.pendingDeletions.isEmpty)
     }
 
     @Test func isOnByDefaultAndRemembersTheChoice() throws {
