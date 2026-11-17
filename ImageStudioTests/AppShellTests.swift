@@ -105,7 +105,7 @@ struct AppModelTests {
 
     private static func inMemoryContainer() throws -> ModelContainer {
         try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
-                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+                           configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
     }
 
     private func isReady(_ model: AppModel) -> Bool {

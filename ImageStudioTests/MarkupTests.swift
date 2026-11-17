@@ -85,7 +85,7 @@ private func filesExist(_ names: [String]) -> [Bool] { names.map(ReferenceStore.
 
 private func makeContainer() throws -> ModelContainer {
     try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
-                       configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+                       configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
 }
 
 /// A `Studio` with no API key, so generations fail straight away without a request, and a
@@ -294,14 +294,14 @@ struct MarkupPersistenceTests {
 
         do {
             let schema = Schema([PreMarkupSchema.GeneratedImage.self, PreMarkupSchema.PendingGeneration.self])
-            let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url))
+            let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none))
             container.mainContext.insert(PreMarkupSchema.GeneratedImage(id: imageID, referenceFileNames: ["a.jpg"]))
             container.mainContext.insert(PreMarkupSchema.PendingGeneration(id: jobID))
             try container.mainContext.save()
         }
 
         let schema = Schema([GeneratedImage.self, PendingGeneration.self])
-        let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url))
+        let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none))
         let image = try #require(try container.mainContext.fetch(FetchDescriptor<GeneratedImage>()).first)
         #expect(image.id == imageID)
         #expect(image.referenceFileNames == ["a.jpg"])

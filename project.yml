@@ -42,6 +42,15 @@ targets:
         # canvas (Composer), so a second one would open the same canvas and edit the same draft.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # iCloud Sync: CloudKit sends a silent push when another device changes the library.
+        UIBackgroundModes: [remote-notification]
+    # iCloud Sync (LibrarySync). XcodeGen writes ImageStudio/ImageStudio.entitlements from this.
+    entitlements:
+      path: ImageStudio/ImageStudio.entitlements
+      properties:
+        com.apple.developer.icloud-container-identifiers: [iCloud.com.eyeb0l.ImageStudio]
+        com.apple.developer.icloud-services: [CloudKit]
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyeb0l.ImageStudio

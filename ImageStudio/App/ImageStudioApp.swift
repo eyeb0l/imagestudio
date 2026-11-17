@@ -1,3 +1,4 @@
+import CoreData
 import SwiftData
 import SwiftUI
 import UIKit
@@ -25,6 +26,7 @@ struct ImageStudioApp: App {
                     .environment(services.preferences)
                     .environment(services.composer)
                     .environment(services.studio)
+                    .environment(services.sync)
                     .environment(GenerationNotifier.shared)
                     .modelContainer(services.container)
             case .recovery:
@@ -34,6 +36,7 @@ struct ImageStudioApp: App {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, case .ready(let services) = model.state else { return }
             services.updates.appBecameActive()
+            services.sync.appBecameActive()
         }
     }
 }
@@ -51,6 +54,7 @@ final class AppModel {
         let composer: Composer
         let studio: Studio
         let updates: GenerationUpdates
+        let sync: LibrarySync
     }
 
     enum State {
@@ -67,17 +71,20 @@ final class AppModel {
     @ObservationIgnored private let opener: @MainActor () throws -> ModelContainer
     @ObservationIgnored private let storeURL: URL
     @ObservationIgnored private let backupsDirectory: URL
+    @ObservationIgnored private let syncStateURL: URL
     @ObservationIgnored private let rasterCache: SVGRasterCache
     @ObservationIgnored private var simulatesFailure: Bool
 
     init(simulatesFailure: Bool = AppModel.launchRequestsSimulatedFailure,
          storeURL: URL = LibraryStore.defaultStoreURL,
          backupsDirectory: URL = LibraryStore.backupsDirectory,
+         syncStateURL: URL = LibrarySyncState.defaultURL,
          rasterCache: SVGRasterCache = .shared,
          opener: @escaping @MainActor () throws -> ModelContainer = LibraryStore.open) {
         self.simulatesFailure = simulatesFailure
         self.storeURL = storeURL
         self.backupsDirectory = backupsDirectory
+        self.syncStateURL = syncStateURL
         self.rasterCache = rasterCache
         self.opener = opener
         tryOpen()
@@ -90,10 +97,13 @@ final class AppModel {
     }
 
     /// Moves the current store files into a timestamped folder under Library Backups (never
-    /// deleting them), then opens a fresh library. Image files are left where they are.
+    /// deleting them), then opens a fresh library. Image files are left where they are. With iCloud
+    /// Sync on, the fresh library downloads everything in iCloud again.
     func resetLibrary(date: Date = .now) {
         do {
-            try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date)
+            // Sync state describes the old library (what it has from iCloud), so it goes with it. If it's
+            // left behind, it still can't be used with the new library: see `LibrarySync`'s library ID.
+            try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date, companions: [syncStateURL])
         } catch {
             resetFailure = "The library couldn't be moved to a backup, so nothing was changed. \(error.localizedDescription)"
             return
@@ -133,7 +143,9 @@ final class AppModel {
         #endif
 
         return Services(container: container, apiKeys: apiKeys, preferences: Preferences(),
-                        composer: Composer(), studio: studio, updates: updates)
+                        composer: Composer(), studio: studio, updates: updates,
+                        sync: LibrarySync(studio: studio, container: container, stateURL: syncStateURL,
+                                          libraryID: LibraryStore.storeID(at: storeURL)))
     }
 
     private static func describe(_ error: Error) -> String {
@@ -161,12 +173,29 @@ enum LibraryStore {
     }
     #endif
 
+    /// `cloudKitDatabase: .none` matters: with an iCloud container in the entitlements, SwiftData
+    /// would otherwise mirror the store to CloudKit itself, which this schema doesn't allow (unique
+    /// IDs, attributes without defaults), so the library wouldn't open. `LibrarySync` syncs instead.
+    private static let schema = Schema([GeneratedImage.self, PendingGeneration.self])
+
     private static var configuration: ModelConfiguration {
-        ModelConfiguration(for: GeneratedImage.self, PendingGeneration.self)
+        ModelConfiguration(schema: schema, cloudKitDatabase: .none)
     }
 
     static func open() throws -> ModelContainer {
-        try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, configurations: configuration)
+        try ModelContainer(for: schema, configurations: configuration)
+    }
+
+    /// Opens a library at another location, configured as the real one is.
+    static func open(at url: URL) throws -> ModelContainer {
+        try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none))
+    }
+
+    /// The store's own UUID, made when the store file is created, so a new library has a new one.
+    /// `nil` if there's no readable store there (e.g. an in-memory library in tests).
+    nonisolated static func storeID(at url: URL) -> String? {
+        let metadata = try? NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
+        return metadata?[NSStoreUUIDKey] as? String
     }
 
     /// Where SwiftData keeps the library by default (`default.store` in Application Support).
@@ -182,9 +211,11 @@ enum LibraryStore {
     /// was nothing to move.
     @discardableResult
     nonisolated static func moveStoreFiles(from storeURL: URL, to backupsDirectory: URL, date: Date = .now,
+                                           companions: [URL] = [],
                                            fileManager: FileManager = .default) throws -> URL? {
-        let sources = ["", "-shm", "-wal"]
-            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) }
+        // Companions (the sync state) go last, so if this stops part way the store that stays keeps them.
+        let sources = (["", "-shm", "-wal"]
+            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) } + companions)
             .filter { fileManager.fileExists(atPath: $0.path(percentEncoded: false)) }
         guard !sources.isEmpty else { return nil }
 
