@@ -34,6 +34,21 @@ nonisolated struct LibrarySyncState: Codable {
 
     static let defaultURL = URL.applicationSupportDirectory.appending(path: "Library Sync.json", directoryHint: .notDirectory)
 
+    init() {}
+
+    /// Missing keys (e.g. from an older version) take their defaults rather than losing the rest.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        engineState = try container.decodeIfPresent(CKSyncEngine.State.Serialization.self, forKey: .engineState)
+        accountID = try container.decodeIfPresent(String.self, forKey: .accountID)
+        zoneCreated = try container.decodeIfPresent(Bool.self, forKey: .zoneCreated) ?? false
+        uploaded = try container.decodeIfPresent(Set<String>.self, forKey: .uploaded) ?? []
+        pendingDeletions = try container.decodeIfPresent(Set<String>.self, forKey: .pendingDeletions) ?? []
+        remoteDeletions = try container.decodeIfPresent(Set<String>.self, forKey: .remoteDeletions) ?? []
+        failedDownloads = try container.decodeIfPresent(Set<String>.self, forKey: .failedDownloads) ?? []
+        incompleteDownloads = try container.decodeIfPresent(Set<String>.self, forKey: .incompleteDownloads) ?? []
+    }
+
     static func load(from url: URL) -> LibrarySyncState {
         guard let data = try? Data(contentsOf: url) else { return LibrarySyncState() }
         // Unreadable state only costs a fresh download; the library itself is unaffected.
@@ -238,6 +253,8 @@ final class LibrarySync: LibraryObserver {
             if checkingEngine === current { checkingEngine = nil }
             guard current === engine else { return }
             if recheckAccount {
+                // The account may have changed, so agreeing to sync no longer says with which one.
+                approvesAccountChange = false
                 checkAccount()
                 return
             }

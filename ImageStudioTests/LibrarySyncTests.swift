@@ -414,6 +414,18 @@ struct LibrarySyncStateTests {
         #expect(!damaged.zoneCreated && damaged.uploaded.isEmpty, "Damaged state starts over rather than failing.")
     }
 
+    @Test func readsStateMissingNewerKeys() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Library Sync.json")
+        try Data(#"{"accountID":"_user","zoneCreated":true,"uploaded":["a"],"pendingDeletions":["b"]}"#.utf8).write(to: url)
+
+        let loaded = LibrarySyncState.load(from: url)
+        #expect(loaded.accountID == "_user" && loaded.zoneCreated)
+        #expect(loaded.uploaded == ["a"] && loaded.pendingDeletions == ["b"])
+        #expect(loaded.incompleteDownloads.isEmpty && loaded.failedDownloads.isEmpty && loaded.remoteDeletions.isEmpty)
+    }
+
     @Test func findsImagesNotYetUploaded() {
         let (a, b) = (UUID(), UUID())
         var state = LibrarySyncState()
