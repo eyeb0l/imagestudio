@@ -1,3 +1,4 @@
+import CoreData
 import SwiftData
 import SwiftUI
 import UIKit
@@ -100,7 +101,8 @@ final class AppModel {
     /// Sync on, the fresh library downloads everything in iCloud again.
     func resetLibrary(date: Date = .now) {
         do {
-            // Sync state describes the old library (what it has from iCloud), so it goes with it.
+            // Sync state describes the old library (what it has from iCloud), so it goes with it. If it's
+            // left behind, it still can't be used with the new library: see `LibrarySync`'s library ID.
             try LibraryStore.moveStoreFiles(from: storeURL, to: backupsDirectory, date: date, companions: [syncStateURL])
         } catch {
             resetFailure = "The library couldn't be moved to a backup, so nothing was changed. \(error.localizedDescription)"
@@ -142,7 +144,8 @@ final class AppModel {
 
         return Services(container: container, apiKeys: apiKeys, preferences: Preferences(),
                         composer: Composer(), studio: studio, updates: updates,
-                        sync: LibrarySync(studio: studio, container: container, stateURL: syncStateURL))
+                        sync: LibrarySync(studio: studio, container: container, stateURL: syncStateURL,
+                                          libraryID: LibraryStore.storeID(at: storeURL)))
     }
 
     private static func describe(_ error: Error) -> String {
@@ -188,6 +191,13 @@ enum LibraryStore {
         try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none))
     }
 
+    /// The store's own UUID, made when the store file is created, so a new library has a new one.
+    /// `nil` if there's no readable store there (e.g. an in-memory library in tests).
+    nonisolated static func storeID(at url: URL) -> String? {
+        let metadata = try? NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
+        return metadata?[NSStoreUUIDKey] as? String
+    }
+
     /// Where SwiftData keeps the library by default (`default.store` in Application Support).
     static var defaultStoreURL: URL { configuration.url }
 
@@ -203,11 +213,9 @@ enum LibraryStore {
     nonisolated static func moveStoreFiles(from storeURL: URL, to backupsDirectory: URL, date: Date = .now,
                                            companions: [URL] = [],
                                            fileManager: FileManager = .default) throws -> URL? {
-        // Companions (the sync state) go first: if this stops part way, the old store is never left
-        // without them while a fresh one would have them. A fresh library with the old sync state would
-        // take every image missing from it as deleted, and delete it from iCloud.
-        let sources = (companions + ["", "-shm", "-wal"]
-            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) })
+        // Companions (the sync state) go last, so if this stops part way the store that stays keeps them.
+        let sources = (["", "-shm", "-wal"]
+            .map { storeURL.deletingLastPathComponent().appending(path: storeURL.lastPathComponent + $0) } + companions)
             .filter { fileManager.fileExists(atPath: $0.path(percentEncoded: false)) }
         guard !sources.isEmpty else { return nil }
 

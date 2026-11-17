@@ -381,6 +381,21 @@ struct LibraryStoreCloudKitTests {
         #expect(container.configurations.allSatisfy { $0.cloudKitContainerIdentifier == nil })
     }
 
+    @Test func identifiesEachStore() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appending(path: "first.store")
+        let second = directory.appending(path: "second.store")
+        _ = try LibraryStore.open(at: first)
+        _ = try LibraryStore.open(at: second)
+
+        let id = try #require(LibraryStore.storeID(at: first))
+        _ = try LibraryStore.open(at: first)
+        #expect(LibraryStore.storeID(at: first) == id, "Reopening a library keeps its ID.")
+        #expect(LibraryStore.storeID(at: second) != id, "A new library gets a new one.")
+        #expect(LibraryStore.storeID(at: directory.appending(path: "missing.store")) == nil)
+    }
+
     @Test func keepsTheExistingStoreLocation() {
         #expect(LibraryStore.defaultStoreURL == URL.applicationSupportDirectory.appending(path: "default.store"))
     }
@@ -424,6 +439,50 @@ struct LibrarySyncStateTests {
         #expect(loaded.accountID == "_user" && loaded.zoneCreated)
         #expect(loaded.uploaded == ["a"] && loaded.pendingDeletions == ["b"])
         #expect(loaded.incompleteDownloads.isEmpty && loaded.failedDownloads.isEmpty && loaded.remoteDeletions.isEmpty)
+    }
+
+    @Test func ignoresStateBelongingToAnotherLibrary() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Library Sync.json")
+        var state = LibrarySyncState()
+        state.libraryID = "old-library"
+        state.accountID = "_previous"
+        state.uploaded = ["a"]
+        state.pendingDeletions = ["b"]
+        try state.save(to: url)
+
+        // e.g. a reset that stopped before the old state was moved away with the old library.
+        let other = LibrarySyncState.load(from: url, libraryID: "new-library")
+        #expect(other.libraryID == "new-library")
+        #expect(other.accountID == nil && other.uploaded.isEmpty && other.pendingDeletions.isEmpty)
+
+        let same = LibrarySyncState.load(from: url, libraryID: "old-library")
+        #expect(same.accountID == "_previous" && same.uploaded == ["a"] && same.pendingDeletions == ["b"])
+
+        // State saved before libraries had IDs is adopted by the library it's used with.
+        state.libraryID = nil
+        try state.save(to: url)
+        let adopted = LibrarySyncState.load(from: url, libraryID: "new-library")
+        #expect(adopted.libraryID == "new-library" && adopted.uploaded == ["a"])
+    }
+
+    @Test func syncStartsFreshWithAnotherLibrarysState() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Library Sync.json")
+        var state = LibrarySyncState()
+        state.libraryID = "old-library"
+        state.uploaded = [UUID().uuidString]
+        try state.save(to: url)
+        let defaults = try #require(UserDefaults(suiteName: "LibrarySyncTests-\(UUID().uuidString)"))
+
+        let container = try makeContainer()
+        let sync = LibrarySync(studio: makeStudio(container: container), container: container, defaults: defaults,
+                               stateURL: url, libraryID: "new-library", usesCloudKit: false)
+
+        #expect(sync.persistedState.uploaded.isEmpty)
+        #expect(LibrarySyncState.load(from: url).libraryID == "new-library", "Saved straight away.")
     }
 
     @Test func findsImagesNotYetUploaded() {
@@ -516,7 +575,9 @@ struct LibrarySyncStateTests {
         let store = directory.appending(path: "default.store")
         try Data("corrupt".utf8).write(to: store)
         let syncState = directory.appending(path: "Library Sync.json")
-        try LibrarySyncState().save(to: syncState)
+        var old = LibrarySyncState()
+        old.uploaded = ["from-the-old-library"]
+        try old.save(to: syncState)
 
         let backups = directory.appending(path: "Library Backups")
         let model = AppModel(simulatesFailure: true, storeURL: store, backupsDirectory: backups, syncStateURL: syncState) {
@@ -526,9 +587,10 @@ struct LibrarySyncStateTests {
 
         // A fresh library downloads everything in iCloud again. With the old state it would take
         // every image as deleted here, and delete it from iCloud.
-        #expect(!exists(syncState))
+        #expect(LibrarySyncState.load(from: syncState).uploaded.isEmpty)
         let backup = try #require(try FileManager.default.contentsOfDirectory(at: backups, includingPropertiesForKeys: nil).first)
-        #expect(exists(backup.appending(path: "Library Sync.json")) && exists(backup.appending(path: "default.store")))
+        #expect(exists(backup.appending(path: "default.store")))
+        #expect(LibrarySyncState.load(from: backup.appending(path: "Library Sync.json")).uploaded == ["from-the-old-library"])
     }
 
     @Test func movesSyncStateEvenWithoutAStore() throws {

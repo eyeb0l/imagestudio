@@ -16,6 +16,8 @@ protocol LibraryObserver: AnyObject {
 nonisolated struct LibrarySyncState: Codable {
     /// `CKSyncEngine`'s own state: what it has fetched, and the changes it still has to send.
     var engineState: CKSyncEngine.State.Serialization?
+    /// The library this state describes (its store's UUID). State for another library is ignored.
+    var libraryID: String?
     /// The iCloud account (user record name) this library syncs with.
     var accountID: String?
     var zoneCreated = false
@@ -40,6 +42,7 @@ nonisolated struct LibrarySyncState: Codable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         engineState = try container.decodeIfPresent(CKSyncEngine.State.Serialization.self, forKey: .engineState)
+        libraryID = try container.decodeIfPresent(String.self, forKey: .libraryID)
         accountID = try container.decodeIfPresent(String.self, forKey: .accountID)
         zoneCreated = try container.decodeIfPresent(Bool.self, forKey: .zoneCreated) ?? false
         uploaded = try container.decodeIfPresent(Set<String>.self, forKey: .uploaded) ?? []
@@ -53,6 +56,17 @@ nonisolated struct LibrarySyncState: Codable {
         guard let data = try? Data(contentsOf: url) else { return LibrarySyncState() }
         // Unreadable state only costs a fresh download; the library itself is unaffected.
         return (try? JSONDecoder().decode(LibrarySyncState.self, from: data)) ?? LibrarySyncState()
+    }
+
+    /// The saved state, if it belongs to the library with `libraryID`; otherwise a fresh start. Used
+    /// with another library (e.g. a reset one left with the old state), it would take every image
+    /// missing from it as deleted, and delete it from iCloud, or bind it to an account it never chose.
+    static func load(from url: URL, libraryID: String?) -> LibrarySyncState {
+        var state = load(from: url)
+        guard let libraryID else { return state }
+        if let saved = state.libraryID, saved != libraryID { state = LibrarySyncState() }
+        state.libraryID = libraryID
+        return state
     }
 
     func save(to url: URL) throws {
@@ -161,17 +175,20 @@ final class LibrarySync: LibraryObserver {
     private var context: ModelContext { container.mainContext }
     private var canSend: Bool { engine != nil && accountConfirmed }
 
-    /// `usesCloudKit: false` keeps everything local, for unit tests (which host the app).
+    /// `libraryID` identifies the library's store (see `LibraryStore.storeID`). `usesCloudKit: false`
+    /// keeps everything local, for unit tests (which host the app).
     init(studio: Studio, container: ModelContainer, defaults: UserDefaults = .standard,
-         stateURL: URL = LibrarySyncState.defaultURL, usesCloudKit: Bool = !LibrarySync.isRunningTests) {
+         stateURL: URL = LibrarySyncState.defaultURL, libraryID: String? = nil,
+         usesCloudKit: Bool = !LibrarySync.isRunningTests) {
         self.studio = studio
         self.container = container
         self.defaults = defaults
         self.stateURL = stateURL
         self.usesCloudKit = usesCloudKit
-        self.state = LibrarySyncState.load(from: stateURL)
+        self.state = LibrarySyncState.load(from: stateURL, libraryID: libraryID)
         self.isEnabled = defaults.object(forKey: Self.enabledKey) as? Bool ?? true
         studio.libraryObserver = self
+        persist()
         if isEnabled { start() }
     }
 
@@ -218,18 +235,22 @@ final class LibrarySync: LibraryObserver {
     /// Picks up anything missed: images iCloud doesn't have, deletions still to make, and downloads
     /// that failed. Cheap when there's nothing to do; `CKSyncEngine` fetches by itself.
     func appBecameActive() {
-        if engine != nil, !accountConfirmed { checkAccount() }
+        if engine != nil, !accountConfirmed { checkAccount(afterAccountChange: false) }
         sendOutstandingWork()
     }
 
-    /// Checks which account is signed in before anything is sent to it.
-    private func checkAccount() {
+    /// Checks which account is signed in before anything is sent to it. `afterAccountChange` makes a
+    /// check already under way out of date; otherwise that check is left to answer.
+    private func checkAccount(afterAccountChange: Bool = true) {
         guard usesCloudKit, let current = engine else { return }
-        accountConfirmed = false
         guard checkingEngine !== current else {
-            recheckAccount = true
+            if afterAccountChange {
+                accountConfirmed = false
+                recheckAccount = true
+            }
             return
         }
+        accountConfirmed = false
         checkingEngine = current
         recheckAccount = false
         Task {
