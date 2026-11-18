@@ -1094,7 +1094,7 @@ struct SVGImageLoadingTests {
         #expect(await loader.image(fileName: fileName, maxPixelSize: 111) != nil)
         #expect(exists(SVGRasterCache.shared.url(forSource: source, maxPixelSize: 111)))
 
-        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
         var settings = GenerationSettings()
         settings.outputFormat = .svg
@@ -1134,7 +1134,7 @@ struct SVGImageLoadingTests {
 
         let model = AppModel(simulatesFailure: true, storeURL: storeURL,
                              backupsDirectory: store.appending(path: "Backups"), rasterCache: cache,
-                             opener: { try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+                             opener: { try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)) })
         model.resetLibrary()
         #expect(!exists(cache.directory))
@@ -1243,7 +1243,7 @@ struct SVGLibraryTests {
     private let container: ModelContainer
 
     init() throws {
-        container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+        container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                        configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
     }
 

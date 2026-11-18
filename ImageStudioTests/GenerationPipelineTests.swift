@@ -145,7 +145,7 @@ struct GenerationTicketTests {
 
     @MainActor
     @Test func pendingRecordsDefaultToFirstAttempt() throws {
-        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
         let record = PendingGeneration(id: UUID(), prompt: "p", settings: GenerationSettings(), startedAt: .now)
         #expect(record.attempt == 1)
@@ -163,7 +163,7 @@ struct GenerationTicketTests {
 @MainActor private var retainedContainers: [ModelContainer] = []
 
 @MainActor private func makeInMemoryContext() throws -> ModelContext {
-    let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+    let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                        configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
     retainedContainers.append(container)
     return container.mainContext

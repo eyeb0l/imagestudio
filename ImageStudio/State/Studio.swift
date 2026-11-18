@@ -452,10 +452,16 @@ final class Studio {
 
     // MARK: Library
 
+    /// Each deletion is recorded for iCloud Sync (`LibraryDeletion`) in the same save that removes
+    /// the image, so it's kept until iCloud confirms it whatever else fails.
     func delete(_ images: [GeneratedImage]) {
         let ids = images.map(\.id)
         let references = images.flatMap(\.referenceStoreFileNames)
-        if let problem = Self.deleteImages(images, in: context) { alertMessage = problem }
+        let account = libraryObserver?.accountID
+        let problem = Self.deleteImages(images, in: context, journal: {
+            try LibraryDeletion.record(ids, as: .pending, owedTo: account, in: $0)
+        })
+        if let problem { alertMessage = problem }
         releaseReferences(references)
         announceDeleted(ids)
     }
@@ -463,8 +469,19 @@ final class Studio {
     /// `keeping` is for files in `ReferenceStore` that something other than the library still
     /// needs: the composer's attachments.
     func deleteAll(keeping held: [String] = [], removeAllImageFiles: () throws -> Void = { try ImageStore.deleteAll() }) {
-        let ids = (try? context.fetch(FetchDescriptor<GeneratedImage>()))?.map(\.id) ?? []
-        if let problem = Self.deleteEverything(in: context, removeAllFiles: removeAllImageFiles) { alertMessage = problem }
+        let ids: [UUID]
+        do {
+            ids = try context.fetch(FetchDescriptor<GeneratedImage>()).map(\.id)
+        } catch {
+            // Without the IDs their deletions couldn't be recorded for iCloud, so nothing is deleted.
+            Self.log.error("Couldn't list images to delete: \(error.localizedDescription, privacy: .public)")
+            alertMessage = "Couldn't delete your images: \(error.localizedDescription)"
+            return
+        }
+        let account = libraryObserver?.accountID
+        let problem = Self.deleteEverything(in: context, removeAllFiles: removeAllImageFiles,
+                                            journal: { try LibraryDeletion.record(ids, as: .pending, owedTo: account, in: $0) })
+        if let problem { alertMessage = problem }
         removeOrphanedReferences(referencedFileNames().union(held))
         announceDeleted(ids)
     }
@@ -588,7 +605,10 @@ final class Studio {
     }
 
     /// Removes images that were deleted on another device, with their files and any reference files
-    /// nothing else uses. Returns the IDs still in the library because removing them failed.
+    /// nothing else uses. Their recorded deletions (`LibraryDeletion`) are done with, so they're
+    /// forgotten in the same save, including for images that are already gone from here, except those
+    /// still owed to another account. Returns
+    /// the IDs still in the library because removing them failed.
     @discardableResult
     func removeSyncedImages(ids: [UUID]) -> [UUID] {
         guard !ids.isEmpty else { return [] }
@@ -599,10 +619,24 @@ final class Studio {
             Self.log.error("Couldn't look up synced deletions: \(error.localizedDescription, privacy: .public)")
             return ids
         }
-        guard !images.isEmpty else { return [] }
+        // Deleted in the account the library syncs with, so only what's owed to it is done with.
+        let account = libraryObserver?.accountID
+        let forget: (ModelContext) throws -> Void = { try LibraryDeletion.forget(ids, finishedBy: account, in: $0) }
+        guard !images.isEmpty else {
+            // In a context of its own, so a failure leaves anything waiting in the main one alone.
+            let journal = ModelContext(container)
+            do {
+                try forget(journal)
+                try journal.save()
+            } catch {
+                // Only costs a deletion sent again, or a removal tried again, that finds nothing.
+                Self.log.error("Couldn't forget synced deletions: \(error.localizedDescription, privacy: .public)")
+            }
+            return []
+        }
         let found = images.map(\.id)
         let references = images.flatMap(\.referenceStoreFileNames)
-        if let problem = Self.deleteImages(images, in: context) { alertMessage = problem }
+        if let problem = Self.deleteImages(images, in: context, journal: forget) { alertMessage = problem }
         releaseReferences(references)
         return existingImageIDs(among: found)
     }
@@ -640,16 +674,20 @@ final class Studio {
     }
 
     /// Deletes records first and files only once the records are gone, so a failure never leaves a
-    /// library entry pointing at a missing file. Returns a message for the user if anything failed.
+    /// library entry pointing at a missing file. `journal` makes changes to save with the deletion
+    /// (see `LibraryDeletion`); if it throws, nothing is deleted. Returns a message for the user if
+    /// anything failed.
     static func deleteImages(
         _ images: [GeneratedImage],
         in context: ModelContext,
+        journal: (ModelContext) throws -> Void = { _ in },
         removeFile: (String) throws -> Void = { try ImageStore.delete(fileName: $0) }
     ) -> String? {
         guard !images.isEmpty else { return nil }
         let fileNames = images.map(\.fileName)
-        for image in images { context.delete(image) }
         do {
+            for image in images { context.delete(image) }
+            try journal(context)
             try context.save()
         } catch {
             context.rollback()
@@ -667,12 +705,15 @@ final class Studio {
         return "Removed from your library, but \(failures == 1 ? "1 file" : "\(failures) files") couldn't be deleted from storage and may still take up space."
     }
 
+    /// `journal` makes changes to save with the deletion, as for `deleteImages`.
     static func deleteEverything(
         in context: ModelContext,
-        removeAllFiles: () throws -> Void = { try ImageStore.deleteAll() }
+        removeAllFiles: () throws -> Void = { try ImageStore.deleteAll() },
+        journal: (ModelContext) throws -> Void = { _ in }
     ) -> String? {
         do {
             try context.delete(model: GeneratedImage.self)
+            try journal(context)
             try context.save()
         } catch {
             context.rollback()

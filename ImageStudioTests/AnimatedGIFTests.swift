@@ -564,7 +564,7 @@ struct GIFLibraryTests {
 
     @Test func committingAGIFKeepsItsBytesExtensionAndSize() async throws {
         let data = TestGIF.make(frames: [(.red, 0.1), (.blue, 0.1)], side: 32)
-        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self,
+        let container = try ModelContainer(for: GeneratedImage.self, PendingGeneration.self, LibraryDeletion.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
         let ticket = GenerationTicket(jobID: UUID(), prompt: "A fox", settings: gif, startedAt: .now)
         let output = OpenAIImageClient.Output(images: [data], revisedPrompts: [nil], size: "1024x1024", quality: "high",
