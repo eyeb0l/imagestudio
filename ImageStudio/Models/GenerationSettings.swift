@@ -130,6 +130,8 @@ nonisolated enum ImageComplexity: String, Codable, CaseIterable, Identifiable, S
 /// The model that writes an SVG from the reference image, sent as `svg.model`. OpenAI's reference
 /// takes any model name and doesn't list which ones work, so these are its current general models.
 nonisolated enum SVGAuthorModel: String, Codable, CaseIterable, Identifiable, Sendable {
+    case astra62 = "gpt-6.2-astra"
+    case sol62 = "gpt-6.2-sol"
     case terra = "gpt-6.1-terra"
     case sol = "gpt-6.1-sol"
     case astra = "gpt-6-astra"
@@ -139,6 +141,8 @@ nonisolated enum SVGAuthorModel: String, Codable, CaseIterable, Identifiable, Se
 
     var displayName: String {
         switch self {
+        case .astra62: "GPT-6.2 Astra"
+        case .sol62: "GPT-6.2 Sol"
         case .terra: "GPT-6.1 Terra"
         case .sol: "GPT-6.1 Sol"
         case .astra: "GPT-6 Astra"
