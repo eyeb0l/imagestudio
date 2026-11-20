@@ -521,6 +521,10 @@ struct SVGAuthorTests {
         #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6.1-terra"])
         settings.svgAuthor = .astra
         #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6-astra"])
+        settings.svgAuthor = .astra62
+        #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6.2-astra"])
+        settings.svgAuthor = .sol62
+        #expect((try body(settings)["svg"] as? [String: String]) == ["model": "gpt-6.2-sol"])
     }
 
     @Test func sendsNoAuthorForOtherFormats() throws {
@@ -538,6 +542,8 @@ struct SVGAuthorTests {
         #expect(try JSONDecoder().decode(GenerationSettings.self, from: Data(saved.utf8)).svgAuthor == .terra)
         let chosen = #"{"outputFormat":"svg","svgAuthor":"gpt-6.1-sol"}"#
         #expect(try JSONDecoder().decode(GenerationSettings.self, from: Data(chosen.utf8)).svgAuthor == .sol)
+        let newer = #"{"outputFormat":"svg","svgAuthor":"gpt-6.2-astra"}"#
+        #expect(try JSONDecoder().decode(GenerationSettings.self, from: Data(newer.utf8)).svgAuthor == .astra62)
     }
 
     @Test func readsTheAuthorsUsage() throws {
