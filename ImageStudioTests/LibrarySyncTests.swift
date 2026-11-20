@@ -190,6 +190,70 @@ struct LibraryRecordTests {
         #expect(LibraryRecord.imageID(of: CKRecord.ID(recordName: image.id.uuidString, zoneID: otherZone)) == nil)
         #expect(LibraryRecord.imageID(of: LibraryRecord.recordID(for: image.id)) == image.id)
     }
+
+    /// Production can't add a field when a record is saved, so a field the app writes that isn't in
+    /// `CloudKit/schema.ckdb` (a copy of production's schema) fails to sync once the app ships.
+    @Test func writesOnlyFieldsInTheProductionSchema() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("GIF".utf8).write(to: directory.appending(path: "ok.gif"))
+        try Data("REF".utf8).write(to: directory.appending(path: "ref.jpg"))
+        try Data("OVERLAY".utf8).write(to: directory.appending(path: "m.markup.png"))
+        let image = fullImage(fileName: "ok.gif", references: ["ref.jpg"], markup: "m.markup.png")
+        // `fullImage` is a GIF, which has no SVG author, but every field needs a value here.
+        image.svgAuthorModel = SVGAuthorModel.terra.rawValue
+        let record = try #require(LibraryRecord.record(for: image, imageDirectory: directory, referenceDirectory: directory))
+
+        var written: [String: String] = [:]
+        // `allKeys()` lists encrypted fields too, but only `encryptedValues` has their values.
+        let encrypted = Set(record.encryptedValues.allKeys())
+        for key in record.allKeys() where !encrypted.contains(key) {
+            let type = try #require(Self.schemaType(of: record[key]), "\(key)")
+            written[key] = type
+        }
+        for key in encrypted {
+            let type = try #require(Self.schemaType(of: record.encryptedValues[key]), "\(key)")
+            written[key] = "ENCRYPTED " + type
+        }
+
+        let schema = try Self.productionFields(ofRecordType: LibraryRecord.recordType)
+        for (key, type) in written.sorted(by: { $0.key < $1.key }) {
+            #expect(schema[key] == type, "\(key) is written as \(type) but the production schema has \(schema[key] ?? "no such field")")
+        }
+        // A field in the schema that isn't written means this image is missing a detail, so the check above missed it.
+        #expect(Set(schema.keys).subtracting(written.keys).isEmpty, "Not written: \(Set(schema.keys).subtracting(written.keys).sorted())")
+    }
+
+    private final class BundleToken {}
+
+    /// The fields of a record type in `CloudKit/schema.ckdb`, with their types, leaving out CloudKit's own.
+    private static func productionFields(ofRecordType recordType: String) throws -> [String: String] {
+        let url = try #require(Bundle(for: BundleToken.self).url(forResource: "schema", withExtension: "ckdb"))
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let body = try #require(text.components(separatedBy: "RECORD TYPE \(recordType) (").dropFirst().first?
+            .components(separatedBy: ");").first)
+        var fields: [String: String] = [:]
+        for line in body.split(separator: "\n") {
+            let words = line.trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: ","))).split(separator: " ")
+            guard let name = words.first, !name.hasPrefix("\""), name != "GRANT", words.count > 1 else { continue }
+            let encrypted = words[1] == "ENCRYPTED"
+            fields[String(name)] = (encrypted ? "ENCRYPTED " : "") + words[encrypted ? 2 : 1]
+        }
+        return fields
+    }
+
+    /// The schema type CloudKit gives a value, or `nil` for one the schema file doesn't describe.
+    private static func schemaType(of value: Any?) -> String? {
+        switch value {
+        case is CKAsset: "ASSET"
+        case is [CKAsset]: "LIST<ASSET>"
+        case is [String]: "LIST<STRING>"
+        case is String: "STRING"
+        case is Date: "TIMESTAMP"
+        case let number as NSNumber: CFNumberIsFloatType(number) ? "DOUBLE" : "INT64"
+        default: nil
+        }
+    }
 }
 
 // MARK: - Applying changes

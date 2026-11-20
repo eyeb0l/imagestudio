@@ -96,6 +96,9 @@ targets:
     platform: iOS
     sources:
       - path: ImageStudioTests
+      # A copy of the CloudKit production schema, which LibraryRecordTests checks records against.
+      - path: CloudKit/schema.ckdb
+        buildPhase: resources
     dependencies:
       - target: ImageStudio
     settings:
